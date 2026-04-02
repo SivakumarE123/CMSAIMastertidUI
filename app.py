@@ -56,7 +56,6 @@ def exchange_code_for_token(code):
         "redirect_uri": TID_REDIRECT_URI,
         "client_id": TID_CLIENT_ID,
         "client_secret": TID_CLIENT_SECRET,
-        "scope": TID_OAUTH_SCOPE,
     }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
     resp.raise_for_status()
     return resp.json()
