@@ -1,0 +1,6 @@
+streamlit
+python-docx
+Pillow
+mcp
+python-dotenv
+requests
