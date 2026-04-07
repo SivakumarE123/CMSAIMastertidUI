@@ -527,8 +527,8 @@ with tab_video:
                         })
                         st.session_state.transcription_status = status_result
 
-                        data = status_result.get("data", {})
-                        job_status = data.get("status", "Unknown")
+                        data = status_result.get("data") or {}
+                        job_status = data.get("status", "Unknown") if isinstance(data, dict) else "Unknown"
 
                         # Progress display while job is running
                         elapsed = 0
@@ -536,15 +536,12 @@ with tab_video:
                             elapsed = _time.time() - st.session_state.video_submit_time
                         mins, secs = divmod(int(elapsed), 60)
 
-                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
-
                         if job_status == "Succeeded":
-                            st.progress(1.0, text=f"✅ {video_filename} — video processing completed")
                             st.session_state.video_polling = False
                         elif job_status in ("Failed", "Cancelled"):
-                            st.progress(1.0, text=f"❌ {video_filename} — {job_status.lower()}")
                             st.session_state.video_polling = False
                         else:
+                            st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
                             st.progress(0.1, text=f"⏳ {video_filename} — video processing")
                             _time.sleep(5)
                             st.rerun()
@@ -577,8 +574,8 @@ with tab_video:
         status = st.session_state.transcription_status
 
         if status.get("status") == "success":
-            data = status.get("data", {})
-            job_status = data.get("status", "Unknown")
+            data = status.get("data") or {}
+            job_status = data.get("status", "Unknown") if isinstance(data, dict) else "Unknown"
 
             if job_status == "Succeeded":
                 transcribed_text = data.get("text", "")
@@ -764,8 +761,8 @@ with tab_multi:
                         })
                         st.session_state.multi_status = status_result
 
-                        data = status_result.get("data", {})
-                        job_status = data.get("status", "Unknown")
+                        data = status_result.get("data") or {}
+                        job_status = data.get("status", "Unknown") if isinstance(data, dict) else "Unknown"
 
                         # -- Progress display while job is running --
                         elapsed = 0
@@ -835,8 +832,8 @@ with tab_multi:
         status = st.session_state.multi_status
 
         if status.get("status") == "success":
-            data = status.get("data", {})
-            job_status = data.get("status", "Unknown")
+            data = status.get("data") or {}
+            job_status = data.get("status", "Unknown") if isinstance(data, dict) else "Unknown"
 
             if job_status == "Succeeded":
                 file_results = data.get("files", [])
