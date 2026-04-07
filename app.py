@@ -520,17 +520,6 @@ with tab_video:
             if job_url:
                 # Auto-poll if polling is active
                 if st.session_state.get("video_polling", False):
-                    # Wait before first poll to let the job progress
-                    elapsed = 0
-                    if st.session_state.video_submit_time:
-                        elapsed = _time.time() - st.session_state.video_submit_time
-                    if elapsed < 30:
-                        mins, secs = divmod(int(elapsed), 60)
-                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
-                        st.progress(0.1, text=f"⏳ {video_filename} — video processing")
-                        _time.sleep(10)
-                        st.rerun()
-
                     try:
                         status_result = call_mcp_tool("transcription_status", {
                             "job_url": job_url,
@@ -554,7 +543,7 @@ with tab_video:
                         else:
                             st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
                             st.progress(0.1, text=f"⏳ {video_filename} — video processing")
-                            _time.sleep(15)
+                            _time.sleep(5)
                             st.rerun()
 
                     except Exception as e:
@@ -765,17 +754,6 @@ with tab_multi:
             if job_url:
                 # Auto-poll if polling is active
                 if st.session_state.get("multi_polling", False):
-                    # Wait before first poll to let the job progress
-                    elapsed = 0
-                    if st.session_state.multi_submit_time:
-                        elapsed = _time.time() - st.session_state.multi_submit_time
-                    if elapsed < 30:
-                        mins, secs = divmod(int(elapsed), 60)
-                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
-                        st.progress(0.05, text="⏳ Waiting for transcription to start...")
-                        _time.sleep(10)
-                        st.rerun()
-
                     try:
                         status_result = call_mcp_tool("multi_transcription_status", {
                             "job_url": job_url,
@@ -822,8 +800,8 @@ with tab_multi:
                         elif job_status in ("Failed", "Cancelled"):
                             st.session_state.multi_polling = False
                         else:
-                            # Still running — auto-refresh in 15 seconds
-                            _time.sleep(15)
+                            # Still running — auto-refresh in 5 seconds
+                            _time.sleep(5)
                             st.rerun()
 
                     except Exception as e:
