@@ -15,6 +15,7 @@ from mcp import ClientSession
 import asyncio
 from dotenv import load_dotenv
 import re
+import time as _time
 import requests as http_requests
 from urllib.parse import urlencode
 
@@ -50,6 +51,17 @@ def get_tid_auth_url():
     return f"{TID_AUTH_URL}?{params}"
 
 
+# def exchange_code_for_token(code):
+#     resp = http_requests.post(TID_TOKEN_URL, data={
+#         "grant_type": "authorization_code",
+#         "code": code,
+#         "redirect_uri": TID_REDIRECT_URI,
+#         "client_id": TID_CLIENT_ID,
+#         "client_secret": TID_CLIENT_SECRET,      
+#     }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
+#     resp.raise_for_status()
+#     return resp.json()
+
 def exchange_code_for_token(code):
     resp = http_requests.post(TID_TOKEN_URL, data={
         "grant_type": "authorization_code",
@@ -60,7 +72,6 @@ def exchange_code_for_token(code):
     if resp.status_code != 200:
         raise Exception(f"{resp.status_code} - {resp.text}")
     return resp.json()
-
 
 def get_tid_user_info(access_token):
     resp = http_requests.get(TID_USERINFO_URL, headers={
@@ -162,8 +173,29 @@ if "video_result" not in st.session_state:
 if "video_uploader_key" not in st.session_state:
     st.session_state.video_uploader_key = 0
 
+if "video_submit_time" not in st.session_state:
+    st.session_state.video_submit_time = None
+
+if "video_polling" not in st.session_state:
+    st.session_state.video_polling = False
+
 if "transcription_status" not in st.session_state:
     st.session_state.transcription_status = None
+
+if "multi_result" not in st.session_state:
+    st.session_state.multi_result = None
+
+if "multi_status" not in st.session_state:
+    st.session_state.multi_status = None
+
+if "multi_uploader_key" not in st.session_state:
+    st.session_state.multi_uploader_key = 0
+
+if "multi_polling" not in st.session_state:
+    st.session_state.multi_polling = False
+
+if "multi_submit_time" not in st.session_state:
+    st.session_state.multi_submit_time = None
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -228,7 +260,7 @@ with st.sidebar:
 # ============================================================
 # TABS
 # ============================================================
-tab_pii, tab_ocr, tab_video = st.tabs(["🛡️ PII Protection", "📄 Mistral OCR", "🎬 Video Transcription"])
+tab_pii, tab_ocr, tab_video, tab_multi = st.tabs(["🛡️ PII Protection", "📄 Mistral OCR", "🎬 Video Transcription", "🌐 Multi-Source Transcription"])
 
 
 # ============================================================
@@ -441,11 +473,13 @@ with tab_video:
         st.session_state.video_result = None
         st.session_state.transcription_status = None
         st.session_state.video_uploader_key += 1
+        st.session_state.video_submit_time = None
+        st.session_state.video_polling = False
         st.rerun()
 
     video_file = st.file_uploader(
         "Upload Video or Audio",
-        type=["mp4", "mov", "mkv", "wav", "mp3"],
+        type=["mp4", "mov", "mkv"],
         key=f"video_upload_{st.session_state.video_uploader_key}"
     )
 
@@ -465,6 +499,10 @@ with tab_video:
                     })
 
                 st.session_state.video_result = result
+                st.session_state.transcription_status = None
+                st.session_state.video_submit_time = _time.time()
+                st.session_state.video_polling = True
+                st.rerun()
 
             except Exception as e:
                 st.error(str(e))
@@ -476,18 +514,58 @@ with tab_video:
 
         if result.get("status") == "success":
             st.success("✅ Transcription job submitted!")
+            video_filename = result.get("filename", "video")
 
-            # Check status button
             job_url = result.get("speech_job_url", "")
-            if job_url and st.button("🔍 Check Transcription Status"):
-                try:
-                    status_result = call_mcp_tool("transcription_status", {
-                        "job_url": job_url,
-                        "email": st.session_state.user_email
-                    })
-                    st.session_state.transcription_status = status_result
-                except Exception as e:
-                    st.error(str(e))
+            if job_url:
+                # Auto-poll if polling is active
+                if st.session_state.get("video_polling", False):
+                    try:
+                        status_result = call_mcp_tool("transcription_status", {
+                            "job_url": job_url,
+                            "email": st.session_state.user_email
+                        })
+                        st.session_state.transcription_status = status_result
+
+                        data = status_result.get("data", {})
+                        job_status = data.get("status", "Unknown")
+
+                        # Progress display while job is running
+                        elapsed = 0
+                        if st.session_state.video_submit_time:
+                            elapsed = _time.time() - st.session_state.video_submit_time
+                        mins, secs = divmod(int(elapsed), 60)
+
+                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
+
+                        if job_status == "Succeeded":
+                            st.progress(1.0, text=f"✅ {video_filename} — video processing completed")
+                            st.session_state.video_polling = False
+                        elif job_status in ("Failed", "Cancelled"):
+                            st.progress(1.0, text=f"❌ {video_filename} — {job_status.lower()}")
+                            st.session_state.video_polling = False
+                        else:
+                            st.progress(0.1, text=f"⏳ {video_filename} — video processing")
+                            _time.sleep(5)
+                            st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Status check error: {e}")
+                        st.session_state.video_polling = False
+
+                # Manual check button when not auto-polling
+                if not st.session_state.get("video_polling", False):
+                    if st.button("🔍 Check Transcription Status"):
+                        try:
+                            with st.spinner("Checking status..."):
+                                status_result = call_mcp_tool("transcription_status", {
+                                    "job_url": job_url,
+                                    "email": st.session_state.user_email
+                                })
+                            st.session_state.transcription_status = status_result
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
         elif result.get("status") == "unauthorized":
             st.error("🔒 " + result.get("error", "Access Denied"))
@@ -504,7 +582,15 @@ with tab_video:
 
             if job_status == "Succeeded":
                 transcribed_text = data.get("text", "")
-                st.success("✅ Transcription Complete!")
+
+                # Total elapsed time
+                elapsed = 0
+                if st.session_state.video_submit_time:
+                    elapsed = _time.time() - st.session_state.video_submit_time
+                mins, secs = divmod(int(elapsed), 60)
+
+                st.success(f"✅ Transcription Complete in **{mins}m {secs}s**!")
+                st.progress(1.0, text="✅ Video processing completed")
 
                 st.subheader("📝 Transcribed Text")
                 st.text_area("", transcribed_text, height=400)
@@ -517,8 +603,296 @@ with tab_video:
                     "transcription.json",
                     mime="application/json"
                 )
+            elif job_status in ("Failed", "Cancelled"):
+                st.error(f"❌ Job {job_status}")
             else:
-                st.info(f"📋 Job Status: **{job_status}** — click Check again in a moment.")
+                st.info(f"📋 Job Status: **{job_status}**")
+
+        elif status.get("status") == "unauthorized":
+            st.error("🔒 " + status.get("error", "Access Denied"))
+        else:
+            st.error("❌ Status check failed: " + status.get("error", "Unknown error"))
+
+# ============================================================
+# TAB 4: MULTI-SOURCE BATCH TRANSCRIPTION
+# ============================================================
+with tab_multi:
+    st.header("Multi-Source Batch Transcription")
+    st.caption("Upload multiple files from different sources — they are transcribed in one batch job")
+
+    if st.button("🔄 Refresh", key="refresh_multi"):
+        st.session_state.multi_result = None
+        st.session_state.multi_status = None
+        st.session_state.multi_uploader_key += 1
+        st.session_state.multi_polling = False
+        st.session_state.multi_submit_time = None
+        st.rerun()
+
+    # ---- SOURCES SECTION ----
+    st.subheader("📁 File Uploads")
+    multi_files = st.file_uploader(
+        "Upload multiple video/audio files",
+        type=["mp4", "mov", "mkv", "wav", "mp3", "flac", "ogg"],
+        accept_multiple_files=True,
+        key=f"multi_upload_{st.session_state.multi_uploader_key}"
+    )
+
+    st.subheader("🔗 Azure Blob URLs")
+    blob_urls_input = st.text_area(
+        "Paste Azure Blob URLs (one per line, with SAS token)",
+        height=100,
+        key="multi_blob_urls"
+    )
+
+    st.subheader("📂 Google Drive URLs")
+    gdrive_urls_input = st.text_area(
+        "Paste Google Drive file URLs (one per line)",
+        height=80,
+        key="multi_gdrive_urls"
+    )
+    gdrive_creds_raw = st.text_area(
+        "Google OAuth Credentials JSON (shared for all Drive files)",
+        height=100,
+        key="multi_gdrive_creds",
+        help="Paste your Google OAuth credentials JSON. It will be encrypted before sending."
+    )
+    multi_creds_encrypted = ""
+    if gdrive_creds_raw and gdrive_urls_input.strip():
+        try:
+            enc_result = call_mcp_tool("encrypt_user_secret", {
+                "plain_text": gdrive_creds_raw,
+                "email": st.session_state.user_email
+            })
+            if enc_result.get("status") == "success":
+                multi_creds_encrypted = enc_result["encrypted"]
+                st.success("🔒 Credentials encrypted")
+            else:
+                st.error(enc_result.get("error", "Encryption failed"))
+        except Exception as e:
+            st.error(f"Encryption error: {e}")
+
+    # ---- BUILD SOURCES LIST ----
+    if st.button("🚀 Start Batch Transcription", key="multi_start"):
+        sources = []
+
+        # File uploads
+        if multi_files:
+            for f in multi_files:
+                b64 = base64.b64encode(f.getvalue()).decode()
+                sources.append({
+                    "source_type": "file_upload",
+                    "data": b64,
+                    "filename": f.name,
+                    "creds_encrypted": ""
+                })
+
+        # Blob URLs
+        if blob_urls_input.strip():
+            for line in blob_urls_input.strip().splitlines():
+                url = line.strip()
+                if url:
+                    sources.append({
+                        "source_type": "blob_url",
+                        "data": url,
+                        "filename": url.split("/")[-1].split("?")[0] or "blob_file",
+                        "creds_encrypted": ""
+                    })
+
+        # Google Drive
+        if gdrive_urls_input.strip():
+            for line in gdrive_urls_input.strip().splitlines():
+                url = line.strip()
+                if url:
+                    sources.append({
+                        "source_type": "gdrive",
+                        "data": url,
+                        "filename": f"gdrive_{url[-10:]}",
+                        "creds_encrypted": multi_creds_encrypted
+                    })
+
+        if not sources:
+            st.error("No files or URLs provided")
+        else:
+            st.info(f"📦 Submitting **{len(sources)}** file(s) for batch transcription...")
+            try:
+                with st.spinner(f"Uploading {len(sources)} file(s) and submitting batch job..."):
+                    result = call_mcp_tool("multi_transcribe", {
+                        "sources_json": json.dumps(sources),
+                        "email": st.session_state.user_email
+                    })
+                st.session_state.multi_result = result
+                st.session_state.multi_status = None
+                st.session_state.multi_polling = True
+                st.session_state.multi_submit_time = _time.time()
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+                st.code(traceback.format_exc())
+
+    # ---- DISPLAY SUBMISSION RESULT ----
+    if st.session_state.multi_result:
+        result = st.session_state.multi_result
+
+        if result.get("status") == "success":
+            total = result.get("total", 0)
+            uploaded = result.get("uploaded", 0)
+            failed = result.get("failed", 0)
+
+            st.success(f"✅ Batch job submitted — **{uploaded}/{total}** files uploaded")
+
+            if failed > 0:
+                st.warning(f"⚠️ {failed} file(s) failed to upload")
+
+            # Show per-file upload status
+            files_info = result.get("files", [])
+            if files_info:
+                with st.expander(f"📋 Upload Details ({len(files_info)} files)", expanded=False):
+                    for i, fi in enumerate(files_info):
+                        icon = "✅" if fi["status"] == "uploaded" else "❌"
+                        st.markdown(f"{icon} **{fi['name']}** — {fi['status']}" +
+                                    (f" ({fi['error']})" if fi.get("error") else ""))
+
+            # ---- AUTO-POLL STATUS ----
+            job_url = result.get("speech_job_url", "")
+            if job_url:
+                # Auto-poll if polling is active
+                if st.session_state.get("multi_polling", False):
+                    try:
+                        status_result = call_mcp_tool("multi_transcription_status", {
+                            "job_url": job_url,
+                            "email": st.session_state.user_email
+                        })
+                        st.session_state.multi_status = status_result
+
+                        data = status_result.get("data", {})
+                        job_status = data.get("status", "Unknown")
+
+                        # -- Progress display while job is running --
+                        elapsed = 0
+                        if st.session_state.multi_submit_time:
+                            elapsed = _time.time() - st.session_state.multi_submit_time
+                        mins, secs = divmod(int(elapsed), 60)
+
+                        completed_count = data.get("completed_count", 0)
+                        total_count = data.get("total_count", total)
+                        progress_pct = completed_count / total_count if total_count > 0 else 0
+
+                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
+                        st.progress(progress_pct, text=f"Transcribing — {completed_count}/{total_count} files done")
+
+                        # Per-file progress rows
+                        file_results = data.get("files", [])
+                        if file_results:
+                            for fr in file_results:
+                                fname = fr.get("name", "unknown")
+                                fstatus = fr.get("status", "running")
+                                if fstatus == "completed":
+                                    st.progress(1.0, text=f"✅ {fname} — video processing completed")
+                                elif fstatus in ("failed", "error"):
+                                    st.progress(1.0, text=f"❌ {fname} — failed")
+                                else:
+                                    st.progress(0.1, text=f"⏳ {fname} — video processing")
+                        else:
+                            # No per-file info yet, show placeholders from upload info
+                            for fi in files_info:
+                                if fi["status"] == "uploaded":
+                                    st.progress(0.1, text=f"⏳ {fi['name']} — video processing")
+
+                        if job_status == "Succeeded":
+                            st.session_state.multi_polling = False
+                        elif job_status in ("Failed", "Cancelled"):
+                            st.session_state.multi_polling = False
+                        else:
+                            # Still running — auto-refresh in 5 seconds
+                            _time.sleep(5)
+                            st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Status check error: {e}")
+                        st.session_state.multi_polling = False
+
+                # Manual check button when not auto-polling
+                if not st.session_state.get("multi_polling", False):
+                    if st.button("🔍 Check Status Again", key="multi_check_status"):
+                        try:
+                            with st.spinner("Checking status..."):
+                                status_result = call_mcp_tool("multi_transcription_status", {
+                                    "job_url": job_url,
+                                    "email": st.session_state.user_email
+                                })
+                            st.session_state.multi_status = status_result
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+        elif result.get("status") == "unauthorized":
+            st.error("🔒 " + result.get("error", "Access Denied"))
+        else:
+            st.error("❌ Transcription Failed: " + result.get("error", "Unknown error"))
+
+    # ---- DISPLAY TRANSCRIPTION RESULTS ----
+    if st.session_state.multi_status:
+        status = st.session_state.multi_status
+
+        if status.get("status") == "success":
+            data = status.get("data", {})
+            job_status = data.get("status", "Unknown")
+
+            if job_status == "Succeeded":
+                file_results = data.get("files", [])
+                total_text = data.get("total_text", "")
+                completed = data.get("completed_count", 0)
+                total_count = data.get("total_count", 0)
+
+                # Total elapsed time
+                elapsed = 0
+                if st.session_state.multi_submit_time:
+                    elapsed = _time.time() - st.session_state.multi_submit_time
+                mins, secs = divmod(int(elapsed), 60)
+
+                st.success(f"✅ Transcription Complete — **{completed}/{total_count}** files transcribed in **{mins}m {secs}s**")
+
+                # Per-file results
+                if file_results:
+                    st.subheader("📊 Per-File Results")
+                    for i, fr in enumerate(file_results):
+                        icon = "✅" if fr["status"] == "completed" else "⚠️"
+                        label = "video processing completed" if fr["status"] == "completed" else fr["status"]
+                        st.progress(1.0, text=f"{icon} {fr['name']} — {label}")
+                        with st.expander(f"{icon} {fr['name']} — {fr['status']}", expanded=(i == 0)):
+                            if fr.get("text"):
+                                st.text_area("", fr["text"], height=200, key=f"multi_file_{i}")
+                            else:
+                                st.info("No speech detected in this file")
+
+                # Combined text
+                if total_text:
+                    st.subheader("📝 Combined Transcription")
+                    st.text_area("", total_text, height=400, key="multi_combined_text")
+
+                    # Downloads
+                    st.download_button("📄 Download Text", total_text, "batch_transcription.txt", key="multi_dl_txt")
+
+                    # Per-file JSON
+                    json_output = json.dumps({
+                        "total_files": total_count,
+                        "completed_files": completed,
+                        "files": file_results,
+                        "combined_text": total_text
+                    }, indent=2)
+
+                    st.download_button(
+                        "📥 Download JSON",
+                        json_output,
+                        "batch_transcription.json",
+                        mime="application/json",
+                        key="multi_dl_json"
+                    )
+
+            elif job_status in ("Failed", "Cancelled"):
+                st.error(f"❌ Job {job_status}")
+            else:
+                st.info(f"📋 Job Status: **{job_status}**")
 
         elif status.get("status") == "unauthorized":
             st.error("🔒 " + status.get("error", "Access Denied"))
