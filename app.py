@@ -55,11 +55,11 @@ def exchange_code_for_token(code):
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": TID_REDIRECT_URI,
-        "client_id": TID_CLIENT_ID,
-        "client_secret": TID_CLIENT_SECRET,
-        "scope": TID_OAUTH_SCOPE,
-    }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
-    resp.raise_for_status()
+        "scope": TID_OAUTH_SCOPE,         
+    }, auth=(TID_CLIENT_ID, TID_CLIENT_SECRET),
+    headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
+    if resp.status_code != 200:
+        raise Exception(f"{resp.status_code} - {resp.text}")
     return resp.json()
 
 
