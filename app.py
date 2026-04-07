@@ -152,6 +152,22 @@ def markdown_to_text(md):
     return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', md)
 
 
+def check_speech_job_status(job_url):
+    """Direct lightweight Speech API status check — bypasses MCP for fast polling."""
+    speech_key = os.getenv("AZURE_SPEECH_KEY", "")
+    if not speech_key or not job_url:
+        return None
+    try:
+        resp = http_requests.get(job_url, headers={
+            "Ocp-Apim-Subscription-Key": speech_key
+        }, timeout=15)
+        if resp.status_code == 200:
+            return resp.json().get("status", "Unknown")
+    except Exception:
+        pass
+    return None
+
+
 # ============================================================
 # SESSION STATE
 # ============================================================
@@ -520,49 +536,33 @@ with tab_video:
             if job_url:
                 # Auto-poll if polling is active
                 if st.session_state.get("video_polling", False):
-                    try:
-                        status_result = call_mcp_tool("transcription_status", {
-                            "job_url": job_url,
-                            "email": st.session_state.user_email
-                        })
-                        st.session_state.transcription_status = status_result
+                    # Lightweight direct status check (no MCP overhead)
+                    job_status = check_speech_job_status(job_url)
 
-                        data = status_result.get("data") or {}
-                        job_status = data.get("status", "Unknown") if isinstance(data, dict) else "Unknown"
+                    elapsed = 0
+                    if st.session_state.video_submit_time:
+                        elapsed = _time.time() - st.session_state.video_submit_time
+                    mins, secs = divmod(int(elapsed), 60)
 
-                        # Progress display while job is running
-                        elapsed = 0
-                        if st.session_state.video_submit_time:
-                            elapsed = _time.time() - st.session_state.video_submit_time
-                        mins, secs = divmod(int(elapsed), 60)
-
-                        if job_status == "Succeeded":
-                            st.session_state.video_polling = False
-                        elif job_status in ("Failed", "Cancelled"):
-                            st.session_state.video_polling = False
-                        else:
-                            st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
-                            st.progress(0.1, text=f"⏳ {video_filename} — video processing")
-                            _time.sleep(5)
-                            st.rerun()
-
-                    except Exception as e:
-                        st.error(f"Status check error: {e}")
-                        st.session_state.video_polling = False
-
-                # Manual check button when not auto-polling
-                if not st.session_state.get("video_polling", False):
-                    if st.button("🔍 Check Transcription Status"):
+                    if job_status == "Succeeded":
+                        # Job done — fetch full result via MCP (one call)
                         try:
-                            with st.spinner("Checking status..."):
-                                status_result = call_mcp_tool("transcription_status", {
-                                    "job_url": job_url,
-                                    "email": st.session_state.user_email
-                                })
+                            status_result = call_mcp_tool("transcription_status", {
+                                "job_url": job_url,
+                                "email": st.session_state.user_email
+                            })
                             st.session_state.transcription_status = status_result
-                            st.rerun()
                         except Exception as e:
-                            st.error(str(e))
+                            st.error(f"Error fetching result: {e}")
+                        st.session_state.video_polling = False
+                    elif job_status in ("Failed", "Cancelled"):
+                        st.session_state.video_polling = False
+                        st.error(f"❌ Job {job_status}")
+                    else:
+                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
+                        st.progress(0.1, text=f"⏳ {video_filename} — video processing")
+                        _time.sleep(5)
+                        st.rerun()
 
         elif result.get("status") == "unauthorized":
             st.error("🔒 " + result.get("error", "Access Denied"))
@@ -752,75 +752,37 @@ with tab_multi:
             # ---- AUTO-POLL STATUS ----
             job_url = result.get("speech_job_url", "")
             if job_url:
-                # Auto-poll if polling is active
                 if st.session_state.get("multi_polling", False):
-                    try:
-                        status_result = call_mcp_tool("multi_transcription_status", {
-                            "job_url": job_url,
-                            "email": st.session_state.user_email
-                        })
-                        st.session_state.multi_status = status_result
+                    # Lightweight direct status check (no MCP overhead)
+                    job_status = check_speech_job_status(job_url)
 
-                        data = status_result.get("data") or {}
-                        job_status = data.get("status", "Unknown") if isinstance(data, dict) else "Unknown"
+                    elapsed = 0
+                    if st.session_state.multi_submit_time:
+                        elapsed = _time.time() - st.session_state.multi_submit_time
+                    mins, secs = divmod(int(elapsed), 60)
 
-                        # -- Progress display while job is running --
-                        elapsed = 0
-                        if st.session_state.multi_submit_time:
-                            elapsed = _time.time() - st.session_state.multi_submit_time
-                        mins, secs = divmod(int(elapsed), 60)
-
-                        completed_count = data.get("completed_count", 0)
-                        total_count = data.get("total_count", total)
-                        progress_pct = completed_count / total_count if total_count > 0 else 0
-
-                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
-                        st.progress(progress_pct, text=f"Transcribing — {completed_count}/{total_count} files done")
-
-                        # Per-file progress rows
-                        file_results = data.get("files", [])
-                        if file_results:
-                            for fr in file_results:
-                                fname = fr.get("name", "unknown")
-                                fstatus = fr.get("status", "running")
-                                if fstatus == "completed":
-                                    st.progress(1.0, text=f"✅ {fname} — video processing completed")
-                                elif fstatus in ("failed", "error"):
-                                    st.progress(1.0, text=f"❌ {fname} — failed")
-                                else:
-                                    st.progress(0.1, text=f"⏳ {fname} — video processing")
-                        else:
-                            # No per-file info yet, show placeholders from upload info
-                            for fi in files_info:
-                                if fi["status"] == "uploaded":
-                                    st.progress(0.1, text=f"⏳ {fi['name']} — video processing")
-
-                        if job_status == "Succeeded":
-                            st.session_state.multi_polling = False
-                        elif job_status in ("Failed", "Cancelled"):
-                            st.session_state.multi_polling = False
-                        else:
-                            # Still running — auto-refresh in 5 seconds
-                            _time.sleep(5)
-                            st.rerun()
-
-                    except Exception as e:
-                        st.error(f"Status check error: {e}")
-                        st.session_state.multi_polling = False
-
-                # Manual check button when not auto-polling
-                if not st.session_state.get("multi_polling", False):
-                    if st.button("🔍 Check Status Again", key="multi_check_status"):
+                    if job_status == "Succeeded":
+                        # Job done — fetch full result via MCP (one call)
                         try:
-                            with st.spinner("Checking status..."):
-                                status_result = call_mcp_tool("multi_transcription_status", {
-                                    "job_url": job_url,
-                                    "email": st.session_state.user_email
-                                })
+                            status_result = call_mcp_tool("multi_transcription_status", {
+                                "job_url": job_url,
+                                "email": st.session_state.user_email
+                            })
                             st.session_state.multi_status = status_result
-                            st.rerun()
                         except Exception as e:
-                            st.error(str(e))
+                            st.error(f"Error fetching result: {e}")
+                        st.session_state.multi_polling = False
+                    elif job_status in ("Failed", "Cancelled"):
+                        st.session_state.multi_polling = False
+                        st.error(f"❌ Job {job_status}")
+                    else:
+                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
+                        # Show per-file placeholders
+                        for fi in files_info:
+                            if fi["status"] == "uploaded":
+                                st.progress(0.1, text=f"⏳ {fi['name']} — video processing")
+                        _time.sleep(5)
+                        st.rerun()
 
         elif result.get("status") == "unauthorized":
             st.error("🔒 " + result.get("error", "Access Denied"))
