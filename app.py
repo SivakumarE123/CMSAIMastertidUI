@@ -32,8 +32,8 @@ TID_REDIRECT_URI = os.getenv("TID_REDIRECT_URI")
 TID_OAUTH_SCOPE = os.getenv("TID_OAUTH_SCOPE")
 TID_LOGOUT_URL = os.getenv("TID_LOGOUT_URL")
 
-st.set_page_config(page_title="PII Protection & OCR", layout="wide")
-st.title("🔐 PII Protection & OCR Tool")
+st.set_page_config(page_title="PII Protection, OCR & Transcription", layout="wide")
+st.title("🔐 PII Protection, OCR & Transcription Tool")
 
 
 # ============================================================
@@ -45,6 +45,7 @@ def get_tid_auth_url():
         "response_type": "code",
         "redirect_uri": TID_REDIRECT_URI,
         "client_id": TID_CLIENT_ID,
+        "scope": TID_OAUTH_SCOPE,
     })
     return f"{TID_AUTH_URL}?{params}"
 
@@ -155,6 +156,15 @@ if "pii_uploader_key" not in st.session_state:
 if "ocr_uploader_key" not in st.session_state:
     st.session_state.ocr_uploader_key = 0
 
+if "video_result" not in st.session_state:
+    st.session_state.video_result = None
+
+if "video_uploader_key" not in st.session_state:
+    st.session_state.video_uploader_key = 0
+
+if "transcription_status" not in st.session_state:
+    st.session_state.transcription_status = None
+
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
@@ -218,7 +228,7 @@ with st.sidebar:
 # ============================================================
 # TABS
 # ============================================================
-tab_pii, tab_ocr = st.tabs(["🛡️ PII Protection", "📄 Mistral OCR"])
+tab_pii, tab_ocr, tab_video = st.tabs(["🛡️ PII Protection", "📄 Mistral OCR", "🎬 Video Transcription"])
 
 
 # ============================================================
@@ -352,11 +362,12 @@ with tab_ocr:
 
                     b64 = base64.b64encode(file_bytes).decode()
 
-                    result = call_mcp_tool("mistral_ocr", {
-                        "file_base64": b64,
-                        "mime_type": mime_type,
-                        "email": st.session_state.user_email
-                    })
+                    with st.spinner("Uploading and processing OCR..."):
+                        result = call_mcp_tool("mistral_ocr", {
+                            "file_base64": b64,
+                            "mime_type": mime_type,
+                            "email": st.session_state.user_email
+                        })
 
                     st.session_state.ocr_result = result
 
@@ -419,3 +430,97 @@ with tab_ocr:
             st.error("🔒 " + result.get("error", "Access Denied"))
         else:
             st.error("❌ OCR Failed: " + result.get("error", "Unknown error"))
+
+# ============================================================
+# TAB 3: VIDEO TRANSCRIPTION
+# ============================================================
+with tab_video:
+    st.header("Video / Audio Transcription")
+
+    if st.button("🔄 Refresh", key="refresh_video"):
+        st.session_state.video_result = None
+        st.session_state.transcription_status = None
+        st.session_state.video_uploader_key += 1
+        st.rerun()
+
+    video_file = st.file_uploader(
+        "Upload Video or Audio",
+        type=["mp4", "mov", "mkv", "wav", "mp3"],
+        key=f"video_upload_{st.session_state.video_uploader_key}"
+    )
+
+    if video_file:
+        st.info(f"📁 {video_file.name} ({video_file.size / (1024*1024):.1f} MB)")
+
+        if st.button("🚀 Start Transcription"):
+            try:
+                file_bytes = video_file.getvalue()
+                b64 = base64.b64encode(file_bytes).decode()
+
+                with st.spinner("Uploading and submitting transcription job..."):
+                    result = call_mcp_tool("video_transcribe", {
+                        "file_base64": b64,
+                        "filename": video_file.name,
+                        "email": st.session_state.user_email
+                    })
+
+                st.session_state.video_result = result
+
+            except Exception as e:
+                st.error(str(e))
+                st.code(traceback.format_exc())
+
+    # DISPLAY SUBMISSION RESULT
+    if st.session_state.video_result:
+        result = st.session_state.video_result
+
+        if result.get("status") == "success":
+            st.success("✅ Transcription job submitted!")
+
+            # Check status button
+            job_url = result.get("speech_job_url", "")
+            if job_url and st.button("🔍 Check Transcription Status"):
+                try:
+                    status_result = call_mcp_tool("transcription_status", {
+                        "job_url": job_url,
+                        "email": st.session_state.user_email
+                    })
+                    st.session_state.transcription_status = status_result
+                except Exception as e:
+                    st.error(str(e))
+
+        elif result.get("status") == "unauthorized":
+            st.error("🔒 " + result.get("error", "Access Denied"))
+        else:
+            st.error("❌ Transcription Failed: " + result.get("error", "Unknown error"))
+
+    # DISPLAY TRANSCRIPTION STATUS
+    if st.session_state.transcription_status:
+        status = st.session_state.transcription_status
+
+        if status.get("status") == "success":
+            data = status.get("data", {})
+            job_status = data.get("status", "Unknown")
+
+            if job_status == "Succeeded":
+                transcribed_text = data.get("text", "")
+                st.success("✅ Transcription Complete!")
+
+                st.subheader("📝 Transcribed Text")
+                st.text_area("", transcribed_text, height=400)
+
+                st.download_button("📄 Download Text", transcribed_text, "transcription.txt")
+
+                st.download_button(
+                    "📥 Download JSON",
+                    json.dumps({"transcribed_text": transcribed_text}, indent=2),
+                    "transcription.json",
+                    mime="application/json"
+                )
+            else:
+                st.info(f"📋 Job Status: **{job_status}** — click Check again in a moment.")
+
+        elif status.get("status") == "unauthorized":
+            st.error("🔒 " + status.get("error", "Access Denied"))
+        else:
+            st.error("❌ Status check failed: " + status.get("error", "Unknown error"))
