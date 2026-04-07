@@ -55,7 +55,6 @@ def exchange_code_for_token(code):
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": TID_REDIRECT_URI,
-        "scope": TID_OAUTH_SCOPE,         
     }, auth=(TID_CLIENT_ID, TID_CLIENT_SECRET),
     headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
     if resp.status_code != 200:
