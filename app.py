@@ -203,6 +203,9 @@ if "video_submit_time" not in st.session_state:
 if "video_polling" not in st.session_state:
     st.session_state.video_polling = False
 
+if "video_poll_count" not in st.session_state:
+    st.session_state.video_poll_count = 0
+
 if "transcription_status" not in st.session_state:
     st.session_state.transcription_status = None
 
@@ -217,6 +220,9 @@ if "multi_uploader_key" not in st.session_state:
 
 if "multi_polling" not in st.session_state:
     st.session_state.multi_polling = False
+
+if "multi_poll_count" not in st.session_state:
+    st.session_state.multi_poll_count = 0
 
 if "multi_submit_time" not in st.session_state:
     st.session_state.multi_submit_time = None
@@ -499,6 +505,7 @@ with tab_video:
         st.session_state.video_uploader_key += 1
         st.session_state.video_submit_time = None
         st.session_state.video_polling = False
+        st.session_state.video_poll_count = 0
         st.rerun()
 
     video_file = st.file_uploader(
@@ -526,6 +533,7 @@ with tab_video:
                 st.session_state.transcription_status = None
                 st.session_state.video_submit_time = _time.time()
                 st.session_state.video_polling = True
+                st.session_state.video_poll_count = 0
                 st.rerun()
 
             except Exception as e:
@@ -544,9 +552,12 @@ with tab_video:
             if job_url:
                 # Auto-poll if polling is active
                 if st.session_state.get("video_polling", False):
+                    st.session_state.video_poll_count = st.session_state.get("video_poll_count", 0) + 1
+                    poll_count = st.session_state.video_poll_count
+
                     debug_lines = []
-                    debug_lines.append(f"🕐 **Poll at:** {_time.strftime('%H:%M:%S')}")
-                    debug_lines.append(f"🔑 **AZURE_SPEECH_KEY:** {'✅ SET (' + str(len(_SPEECH_KEY)) + ' chars)' if _SPEECH_KEY else '❌ NOT SET'}")
+                    debug_lines.append(f"🕐 **Poll at:** {_time.strftime('%H:%M:%S')} (cycle #{poll_count})")
+                    debug_lines.append(f"🔑 **AZURE_SPEECH_KEY:** {'✅ SET (' + str(len(_SPEECH_KEY)) + ' chars)' if _SPEECH_KEY else '❌ NOT SET — add to Azure App Settings!'}")
                     debug_lines.append(f"🌐 **MCP_URL:** `{MCP_URL}`")
                     debug_lines.append(f"🔗 **job_url:** `{job_url[:100]}...`")
 
@@ -566,14 +577,20 @@ with tab_video:
                                 "email": st.session_state.user_email
                             })
                             t_mcp = _time.time() - t_mcp_start
-                            debug_lines.append(f"🔄 **MCP response:** `{json.dumps(fallback)[:200]}` ({t_mcp:.2f}s)")
+                            debug_lines.append(f"🔄 **MCP raw response:** `{json.dumps(fallback)[:300]}` ({t_mcp:.2f}s)")
                             if isinstance(fallback, dict) and fallback.get("status") == "success":
-                                inner = fallback.get("data") or {}
-                                if isinstance(inner, dict):
-                                    job_status = inner.get("status", "Running")
+                                inner = fallback.get("data")
+                                if isinstance(inner, dict) and "status" in inner:
+                                    job_status = inner["status"]
                                     if job_status == "Succeeded":
                                         st.session_state.transcription_status = fallback
-                            debug_lines.append(f"🏷️ **MCP extracted status:** `{job_status}`")
+                                    debug_lines.append(f"🏷️ **MCP extracted status:** `{job_status}`")
+                                else:
+                                    debug_lines.append(f"🚨 **MCP data is null/invalid:** `{inner}` — will retry")
+                                    job_status = None  # keep as None, don't assume Running
+                            elif isinstance(fallback, dict) and fallback.get("status") == "failed":
+                                debug_lines.append(f"🚨 **MCP returned failed:** `{fallback.get('error', '')}`")
+                                job_status = None
                         except Exception as ex:
                             t_mcp = _time.time() - t_mcp_start
                             debug_lines.append(f"❌ **MCP error:** `{ex}` ({t_mcp:.2f}s)")
@@ -584,7 +601,7 @@ with tab_video:
                     mins, secs = divmod(int(elapsed), 60)
 
                     # Show debug panel
-                    with st.expander("🐛 DEBUG — Poll Cycle Info (remove after debugging)", expanded=True):
+                    with st.expander(f"🐛 DEBUG — Poll #{poll_count} (remove after debugging)", expanded=True):
                         for line in debug_lines:
                             st.markdown(line)
 
@@ -603,6 +620,9 @@ with tab_video:
                     elif job_status in ("Failed", "Cancelled"):
                         st.session_state.video_polling = False
                         st.error(f"❌ Job {job_status}")
+                    elif poll_count >= 120:
+                        st.session_state.video_polling = False
+                        st.error("❌ Polling stopped after 120 cycles (~10 min). Check debug info above.")
                     else:
                         st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
                         st.progress(0.1, text=f"⏳ {video_filename} — video processing")
@@ -668,6 +688,7 @@ with tab_multi:
         st.session_state.multi_uploader_key += 1
         st.session_state.multi_polling = False
         st.session_state.multi_submit_time = None
+        st.session_state.multi_poll_count = 0
         st.rerun()
 
     # ---- SOURCES SECTION ----
@@ -766,6 +787,7 @@ with tab_multi:
                 st.session_state.multi_status = None
                 st.session_state.multi_polling = True
                 st.session_state.multi_submit_time = _time.time()
+                st.session_state.multi_poll_count = 0
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
@@ -798,9 +820,12 @@ with tab_multi:
             job_url = result.get("speech_job_url", "")
             if job_url:
                 if st.session_state.get("multi_polling", False):
+                    st.session_state.multi_poll_count = st.session_state.get("multi_poll_count", 0) + 1
+                    poll_count = st.session_state.multi_poll_count
+
                     debug_lines = []
-                    debug_lines.append(f"🕐 **Poll at:** {_time.strftime('%H:%M:%S')}")
-                    debug_lines.append(f"🔑 **AZURE_SPEECH_KEY:** {'✅ SET (' + str(len(_SPEECH_KEY)) + ' chars)' if _SPEECH_KEY else '❌ NOT SET'}")
+                    debug_lines.append(f"🕐 **Poll at:** {_time.strftime('%H:%M:%S')} (cycle #{poll_count})")
+                    debug_lines.append(f"🔑 **AZURE_SPEECH_KEY:** {'✅ SET (' + str(len(_SPEECH_KEY)) + ' chars)' if _SPEECH_KEY else '❌ NOT SET — add to Azure App Settings!'}")
                     debug_lines.append(f"🌐 **MCP_URL:** `{MCP_URL}`")
                     debug_lines.append(f"🔗 **job_url:** `{job_url[:100]}...`")
 
@@ -820,14 +845,20 @@ with tab_multi:
                                 "email": st.session_state.user_email
                             })
                             t_mcp = _time.time() - t_mcp_start
-                            debug_lines.append(f"🔄 **MCP response:** `{json.dumps(fallback)[:200]}` ({t_mcp:.2f}s)")
+                            debug_lines.append(f"🔄 **MCP raw response:** `{json.dumps(fallback)[:300]}` ({t_mcp:.2f}s)")
                             if isinstance(fallback, dict) and fallback.get("status") == "success":
-                                inner = fallback.get("data") or {}
-                                if isinstance(inner, dict):
-                                    job_status = inner.get("status", "Running")
+                                inner = fallback.get("data")
+                                if isinstance(inner, dict) and "status" in inner:
+                                    job_status = inner["status"]
                                     if job_status == "Succeeded":
                                         st.session_state.multi_status = fallback
-                            debug_lines.append(f"🏷️ **MCP extracted status:** `{job_status}`")
+                                    debug_lines.append(f"🏷️ **MCP extracted status:** `{job_status}`")
+                                else:
+                                    debug_lines.append(f"🚨 **MCP data is null/invalid:** `{inner}` — will retry")
+                                    job_status = None
+                            elif isinstance(fallback, dict) and fallback.get("status") == "failed":
+                                debug_lines.append(f"🚨 **MCP returned failed:** `{fallback.get('error', '')}`")
+                                job_status = None
                         except Exception as ex:
                             t_mcp = _time.time() - t_mcp_start
                             debug_lines.append(f"❌ **MCP error:** `{ex}` ({t_mcp:.2f}s)")
@@ -838,7 +869,7 @@ with tab_multi:
                     mins, secs = divmod(int(elapsed), 60)
 
                     # Show debug panel
-                    with st.expander("🐛 DEBUG — Poll Cycle Info (remove after debugging)", expanded=True):
+                    with st.expander(f"🐛 DEBUG — Poll #{poll_count} (remove after debugging)", expanded=True):
                         for line in debug_lines:
                             st.markdown(line)
 
@@ -856,6 +887,9 @@ with tab_multi:
                     elif job_status in ("Failed", "Cancelled"):
                         st.session_state.multi_polling = False
                         st.error(f"❌ Job {job_status}")
+                    elif poll_count >= 120:
+                        st.session_state.multi_polling = False
+                        st.error("❌ Polling stopped after 120 cycles (~10 min). Check debug info above.")
                     else:
                         st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
                         for fi in files_info:
