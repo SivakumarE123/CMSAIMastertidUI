@@ -760,7 +760,7 @@ if _has_admin:
             with _upd_rc2:
                 _upd_debug = st.checkbox("🐛 Debug", key="admin_upd_debug")
 
-            _upd_col1, _upd_col2 = st.columns(2)
+            _upd_col1 = st.columns(1)[0]
             with _upd_col1:
                 if st.button("🔄 Update", key="admin_upd_btn"):
                     if not _upd_email or not _upd_email.strip():
@@ -787,23 +787,61 @@ if _has_admin:
                         except Exception as _e:
                             st.error(f"Error: {_e}")
 
-            with _upd_col2:
-                if st.button("🗑️ Delete", key="admin_delete_btn"):
-                    if not _upd_email or not _upd_email.strip():
-                        st.error("Enter an email")
-                    else:
+            # ---- DELETE USER ----
+            st.markdown("---")
+            st.markdown("#### 🗑️ Delete User")
+
+            # Show success message from previous delete
+            if "admin_del_msg" not in st.session_state:
+                st.session_state.admin_del_msg = ""
+            if st.session_state.admin_del_msg:
+                st.success(st.session_state.admin_del_msg)
+                st.session_state.admin_del_msg = ""
+
+            _del_email = st.text_input("Email", key="admin_del_email", placeholder="user@example.com")
+
+            # Initialise confirmation state
+            if "admin_del_confirm" not in st.session_state:
+                st.session_state.admin_del_confirm = False
+            if "admin_del_target" not in st.session_state:
+                st.session_state.admin_del_target = ""
+
+            if st.button("🗑️ Delete User", key="admin_delete_btn"):
+                if not _del_email or not _del_email.strip():
+                    st.error("Enter an email")
+                else:
+                    st.session_state.admin_del_confirm = True
+                    st.session_state.admin_del_target = _del_email.strip()
+                    st.rerun()
+
+            if st.session_state.admin_del_confirm and st.session_state.admin_del_target:
+                st.warning(f"⚠️ Are you sure you want to delete **{st.session_state.admin_del_target}**?")
+                _cf_col1, _cf_col2 = st.columns(2)
+                with _cf_col1:
+                    if st.button("✅ Yes, delete", key="admin_del_yes"):
+                        _del_ok = False
                         try:
                             _del_resp = call_mcp_tool("admin_delete_user", {
-                                "target_email": _upd_email.strip(),
+                                "target_email": st.session_state.admin_del_target,
                                 "email": st.session_state.user_email
                             })
                             if _del_resp.get("status") == "success":
-                                st.success(f"🗑️ Deleted {_upd_email}")
+                                st.session_state.admin_del_msg = f"🗑️ Deleted {st.session_state.admin_del_target}"
                                 st.session_state.admin_users_list = []
+                                _del_ok = True
                             else:
                                 st.error(_del_resp.get("error", "Failed"))
                         except Exception as _e:
                             st.error(f"Error: {_e}")
+                        st.session_state.admin_del_confirm = False
+                        st.session_state.admin_del_target = ""
+                        if _del_ok:
+                            st.rerun()
+                with _cf_col2:
+                    if st.button("❌ Cancel", key="admin_del_no"):
+                        st.session_state.admin_del_confirm = False
+                        st.session_state.admin_del_target = ""
+                        st.rerun()
 
 
 # ============================================================
