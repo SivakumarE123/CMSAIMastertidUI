@@ -243,6 +243,118 @@ def check_speech_job_status(job_url):
     return None
 
 
+def fetch_speech_result_direct(job_url):
+    """Fetch FULL transcription result directly from Speech API (bypass MCP)."""
+    if not _SPEECH_KEY or not job_url:
+        _dbg("DIRECT RESULT SKIP: no key or url")
+        return None
+    try:
+        _dbg(f"DIRECT RESULT → GET {job_url[:80]}")
+        t0 = _time.time()
+        resp = _speech_session.get(job_url, timeout=15)
+        if resp.status_code != 200:
+            _dbg(f"DIRECT RESULT: job status HTTP {resp.status_code}")
+            return None
+        job_data = resp.json()
+        status = job_data.get("status", "Unknown")
+        _dbg(f"DIRECT RESULT: status={status}")
+        if status != "Succeeded":
+            return None
+
+        files_url = job_data.get("links", {}).get("files", "")
+        _dbg(f"DIRECT RESULT: files_url={files_url[:120]}")
+        if not files_url:
+            _dbg("DIRECT RESULT: no files link!")
+            return None
+
+        files_resp = _speech_session.get(files_url, timeout=15)
+        if files_resp.status_code != 200:
+            _dbg(f"DIRECT RESULT: files HTTP {files_resp.status_code}")
+            return None
+
+        transcription_text = ""
+        for f in files_resp.json().get("values", []):
+            if f.get("kind") == "Transcription":
+                content_url = f.get("links", {}).get("contentUrl", "")
+                _dbg(f"DIRECT RESULT: fetching content from {content_url[:100]}")
+                if content_url:
+                    content_resp = _speech_session.get(content_url, timeout=15)
+                    if content_resp.status_code == 200:
+                        content = content_resp.json()
+                        phrases = content.get("combinedRecognizedPhrases", [])
+                        if phrases:
+                            transcription_text += phrases[0].get("display", "") + "\n"
+                            _dbg(f"DIRECT RESULT: got {len(phrases[0].get('display',''))} chars")
+
+        elapsed = _time.time() - t0
+        _dbg(f"DIRECT RESULT DONE ({elapsed:.2f}s) text_len={len(transcription_text)}")
+        return {
+            "status": "success",
+            "data": {"status": "Succeeded", "text": transcription_text.strip()}
+        }
+    except Exception as e:
+        _dbg(f"DIRECT RESULT EXCEPTION: {e}")
+        return None
+
+
+def fetch_multi_result_direct(job_url):
+    """Fetch FULL batch transcription result directly from Speech API (bypass MCP)."""
+    if not _SPEECH_KEY or not job_url:
+        _dbg("DIRECT MULTI SKIP: no key or url")
+        return None
+    try:
+        _dbg(f"DIRECT MULTI → GET {job_url[:80]}")
+        t0 = _time.time()
+        resp = _speech_session.get(job_url, timeout=15)
+        if resp.status_code != 200:
+            _dbg(f"DIRECT MULTI: job HTTP {resp.status_code}")
+            return None
+        job_data = resp.json()
+        status = job_data.get("status", "Unknown")
+        if status != "Succeeded":
+            return None
+
+        files_url = job_data.get("links", {}).get("files", "")
+        if not files_url:
+            return None
+
+        files_resp = _speech_session.get(files_url, timeout=15)
+        if files_resp.status_code != 200:
+            return None
+
+        file_results = []
+        total_text = ""
+        for f in files_resp.json().get("values", []):
+            if f.get("kind") == "Transcription":
+                content_url = f.get("links", {}).get("contentUrl", "")
+                fname = f.get("name", "file")
+                if content_url:
+                    content_resp = _speech_session.get(content_url, timeout=15)
+                    if content_resp.status_code == 200:
+                        content = content_resp.json()
+                        phrases = content.get("combinedRecognizedPhrases", [])
+                        text = phrases[0].get("display", "") if phrases else ""
+                        file_results.append({"name": fname, "status": "completed", "text": text})
+                        total_text += text + "\n"
+                        _dbg(f"DIRECT MULTI: {fname} → {len(text)} chars")
+
+        elapsed = _time.time() - t0
+        _dbg(f"DIRECT MULTI DONE ({elapsed:.2f}s) files={len(file_results)}")
+        return {
+            "status": "success",
+            "data": {
+                "status": "Succeeded",
+                "files": file_results,
+                "total_text": total_text.strip(),
+                "completed_count": len(file_results),
+                "total_count": len(file_results)
+            }
+        }
+    except Exception as e:
+        _dbg(f"DIRECT MULTI EXCEPTION: {e}")
+        return None
+
+
 # ============================================================
 # SESSION STATE
 # ============================================================
@@ -796,26 +908,34 @@ with tab_video:
                             st.markdown(line)
 
                     if job_status == "Succeeded":
-                        # Fetch full result via MCP (one call)
+                        # Fetch full result — try DIRECT first, fall back to MCP
                         if not st.session_state.transcription_status:
-                            try:
-                                mcp_result = call_mcp_tool("transcription_status", {
-                                    "job_url": job_url,
-                                    "email": st.session_state.user_email
-                                })
-                                # Validate MCP returned actual data
-                                mcp_data = mcp_result.get("data") if isinstance(mcp_result, dict) else None
-                                if isinstance(mcp_data, dict) and mcp_data.get("status") == "Succeeded":
-                                    st.session_state.transcription_status = mcp_result
-                                    _dbg(f"TAB3 RESULT STORED: text_len={len(str(mcp_data.get('text','')))}")
-                                else:
-                                    _dbg(f"TAB3 RESULT INCOMPLETE — retrying: {json.dumps(mcp_result,default=str)[:200]}")
-                                    st.warning(f"⚠️ MCP returned incomplete data: `{json.dumps(mcp_result)[:200]}` — retrying...")
-                                    _time.sleep(5)
-                                    st.rerun()
-                            except Exception as e:
-                                _dbg(f"TAB3 RESULT FETCH ERROR: {e}")
-                                st.error(f"Error fetching result: {e}")
+                            _dbg("TAB3 FETCHING FULL RESULT...")
+                            # 1) Try direct Speech API (fast, reliable)
+                            direct_result = fetch_speech_result_direct(job_url)
+                            if direct_result:
+                                st.session_state.transcription_status = direct_result
+                                _dbg("TAB3 RESULT VIA DIRECT API ✅")
+                            else:
+                                # 2) Fall back to MCP
+                                _dbg("TAB3 DIRECT FAILED — trying MCP...")
+                                try:
+                                    mcp_result = call_mcp_tool("transcription_status", {
+                                        "job_url": job_url,
+                                        "email": st.session_state.user_email
+                                    })
+                                    mcp_data = mcp_result.get("data") if isinstance(mcp_result, dict) else None
+                                    if isinstance(mcp_data, dict) and mcp_data.get("status") == "Succeeded":
+                                        st.session_state.transcription_status = mcp_result
+                                        _dbg("TAB3 RESULT VIA MCP ✅")
+                                    else:
+                                        _dbg(f"TAB3 MCP ALSO INCOMPLETE — retrying: {json.dumps(mcp_result,default=str)[:200]}")
+                                        st.warning("⚠️ Both direct API and MCP returned incomplete data — retrying...")
+                                        _time.sleep(5)
+                                        st.rerun()
+                                except Exception as e:
+                                    _dbg(f"TAB3 MCP RESULT ERROR: {e}")
+                                    st.error(f"Error fetching result: {e}")
                         st.session_state.video_polling = False
                         _dbg("TAB3 POLLING STOPPED — Succeeded")
                         st.rerun()
@@ -1094,24 +1214,32 @@ with tab_multi:
 
                     if job_status == "Succeeded":
                         if not st.session_state.multi_status:
-                            try:
-                                mcp_result = call_mcp_tool("multi_transcription_status", {
-                                    "job_url": job_url,
-                                    "email": st.session_state.user_email
-                                })
-                                # Validate MCP returned actual data
-                                mcp_data = mcp_result.get("data") if isinstance(mcp_result, dict) else None
-                                if isinstance(mcp_data, dict) and mcp_data.get("status") == "Succeeded":
-                                    st.session_state.multi_status = mcp_result
-                                    _dbg(f"TAB4 RESULT STORED")
-                                else:
-                                    _dbg(f"TAB4 RESULT INCOMPLETE — retrying: {json.dumps(mcp_result,default=str)[:200]}")
-                                    st.warning(f"⚠️ MCP returned incomplete data: `{json.dumps(mcp_result)[:200]}` — retrying...")
-                                    _time.sleep(5)
-                                    st.rerun()
-                            except Exception as e:
-                                _dbg(f"TAB4 RESULT FETCH ERROR: {e}")
-                                st.error(f"Error fetching result: {e}")
+                            _dbg("TAB4 FETCHING FULL RESULT...")
+                            # 1) Try direct Speech API
+                            direct_result = fetch_multi_result_direct(job_url)
+                            if direct_result:
+                                st.session_state.multi_status = direct_result
+                                _dbg(f"TAB4 RESULT VIA DIRECT API ✅")
+                            else:
+                                # 2) Fall back to MCP
+                                _dbg("TAB4 DIRECT FAILED — trying MCP...")
+                                try:
+                                    mcp_result = call_mcp_tool("multi_transcription_status", {
+                                        "job_url": job_url,
+                                        "email": st.session_state.user_email
+                                    })
+                                    mcp_data = mcp_result.get("data") if isinstance(mcp_result, dict) else None
+                                    if isinstance(mcp_data, dict) and mcp_data.get("status") == "Succeeded":
+                                        st.session_state.multi_status = mcp_result
+                                        _dbg(f"TAB4 RESULT VIA MCP ✅")
+                                    else:
+                                        _dbg(f"TAB4 MCP ALSO INCOMPLETE — retrying: {json.dumps(mcp_result,default=str)[:200]}")
+                                        st.warning(f"⚠️ Both direct API and MCP returned incomplete data — retrying...")
+                                        _time.sleep(5)
+                                        st.rerun()
+                                except Exception as e:
+                                    _dbg(f"TAB4 MCP RESULT ERROR: {e}")
+                                    st.error(f"Error fetching result: {e}")
                         st.session_state.multi_polling = False
                         _dbg("TAB4 POLLING STOPPED — Succeeded")
                         st.rerun()
