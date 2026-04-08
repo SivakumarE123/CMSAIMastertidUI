@@ -544,30 +544,49 @@ with tab_video:
             if job_url:
                 # Auto-poll if polling is active
                 if st.session_state.get("video_polling", False):
+                    debug_lines = []
+                    debug_lines.append(f"🕐 **Poll at:** {_time.strftime('%H:%M:%S')}")
+                    debug_lines.append(f"🔑 **AZURE_SPEECH_KEY:** {'✅ SET (' + str(len(_SPEECH_KEY)) + ' chars)' if _SPEECH_KEY else '❌ NOT SET'}")
+                    debug_lines.append(f"🌐 **MCP_URL:** `{MCP_URL}`")
+                    debug_lines.append(f"🔗 **job_url:** `{job_url[:100]}...`")
+
                     # Fast direct API check first
+                    t_direct_start = _time.time()
                     job_status = check_speech_job_status(job_url)
-                    print(f"[POLL-VIDEO] direct check → {job_status}")
+                    t_direct = _time.time() - t_direct_start
+                    debug_lines.append(f"📡 **Direct API check:** `{job_status}` ({t_direct:.2f}s)")
 
                     # Fallback to MCP if direct check unavailable
                     if job_status is None:
+                        debug_lines.append("⚠️ Direct check returned None — falling back to MCP...")
+                        t_mcp_start = _time.time()
                         try:
-                            print("[POLL-VIDEO] direct unavailable, falling back to MCP...")
                             fallback = call_mcp_tool("transcription_status", {
                                 "job_url": job_url,
                                 "email": st.session_state.user_email
                             })
+                            t_mcp = _time.time() - t_mcp_start
+                            debug_lines.append(f"🔄 **MCP response:** `{json.dumps(fallback)[:200]}` ({t_mcp:.2f}s)")
                             if isinstance(fallback, dict) and fallback.get("status") == "success":
                                 inner = fallback.get("data") or {}
                                 if isinstance(inner, dict):
                                     job_status = inner.get("status", "Running")
                                     if job_status == "Succeeded":
                                         st.session_state.transcription_status = fallback
-                            print(f"[POLL-VIDEO] MCP fallback → {job_status}")
+                            debug_lines.append(f"🏷️ **MCP extracted status:** `{job_status}`")
                         except Exception as ex:
-                            print(f"[POLL-VIDEO] MCP fallback error: {ex}")
+                            t_mcp = _time.time() - t_mcp_start
+                            debug_lines.append(f"❌ **MCP error:** `{ex}` ({t_mcp:.2f}s)")
+
+                    debug_lines.append(f"✅ **Final job_status:** `{job_status}`")
 
                     elapsed = _time.time() - st.session_state.video_submit_time if st.session_state.video_submit_time else 0
                     mins, secs = divmod(int(elapsed), 60)
+
+                    # Show debug panel
+                    with st.expander("🐛 DEBUG — Poll Cycle Info (remove after debugging)", expanded=True):
+                        for line in debug_lines:
+                            st.markdown(line)
 
                     if job_status == "Succeeded":
                         # Fetch full result via MCP (one call)
@@ -779,30 +798,49 @@ with tab_multi:
             job_url = result.get("speech_job_url", "")
             if job_url:
                 if st.session_state.get("multi_polling", False):
+                    debug_lines = []
+                    debug_lines.append(f"🕐 **Poll at:** {_time.strftime('%H:%M:%S')}")
+                    debug_lines.append(f"🔑 **AZURE_SPEECH_KEY:** {'✅ SET (' + str(len(_SPEECH_KEY)) + ' chars)' if _SPEECH_KEY else '❌ NOT SET'}")
+                    debug_lines.append(f"🌐 **MCP_URL:** `{MCP_URL}`")
+                    debug_lines.append(f"🔗 **job_url:** `{job_url[:100]}...`")
+
                     # Fast direct API check first
+                    t_direct_start = _time.time()
                     job_status = check_speech_job_status(job_url)
-                    print(f"[POLL-MULTI] direct check → {job_status}")
+                    t_direct = _time.time() - t_direct_start
+                    debug_lines.append(f"📡 **Direct API check:** `{job_status}` ({t_direct:.2f}s)")
 
                     # Fallback to MCP if direct check unavailable
                     if job_status is None:
+                        debug_lines.append("⚠️ Direct check returned None — falling back to MCP...")
+                        t_mcp_start = _time.time()
                         try:
-                            print("[POLL-MULTI] direct unavailable, falling back to MCP...")
                             fallback = call_mcp_tool("multi_transcription_status", {
                                 "job_url": job_url,
                                 "email": st.session_state.user_email
                             })
+                            t_mcp = _time.time() - t_mcp_start
+                            debug_lines.append(f"🔄 **MCP response:** `{json.dumps(fallback)[:200]}` ({t_mcp:.2f}s)")
                             if isinstance(fallback, dict) and fallback.get("status") == "success":
                                 inner = fallback.get("data") or {}
                                 if isinstance(inner, dict):
                                     job_status = inner.get("status", "Running")
                                     if job_status == "Succeeded":
                                         st.session_state.multi_status = fallback
-                            print(f"[POLL-MULTI] MCP fallback → {job_status}")
+                            debug_lines.append(f"🏷️ **MCP extracted status:** `{job_status}`")
                         except Exception as ex:
-                            print(f"[POLL-MULTI] MCP fallback error: {ex}")
+                            t_mcp = _time.time() - t_mcp_start
+                            debug_lines.append(f"❌ **MCP error:** `{ex}` ({t_mcp:.2f}s)")
+
+                    debug_lines.append(f"✅ **Final job_status:** `{job_status}`")
 
                     elapsed = _time.time() - st.session_state.multi_submit_time if st.session_state.multi_submit_time else 0
                     mins, secs = divmod(int(elapsed), 60)
+
+                    # Show debug panel
+                    with st.expander("🐛 DEBUG — Poll Cycle Info (remove after debugging)", expanded=True):
+                        for line in debug_lines:
+                            st.markdown(line)
 
                     if job_status == "Succeeded":
                         if not st.session_state.multi_status:
