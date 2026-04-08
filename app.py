@@ -18,10 +18,47 @@ import re
 import time as _time
 import requests as http_requests
 from urllib.parse import urlencode
+import socket
+import platform
 
 load_dotenv()
 
 MCP_URL = os.getenv("MCP_URL", "")
+
+# ============================================================
+# DEBUG INFRASTRUCTURE (remove entire block after debugging)
+# ============================================================
+_APP_START = _time.time()
+
+def _dbg(msg):
+    """Append timestamped message to persistent debug log (survives st.rerun)."""
+    if "debug_log" not in st.session_state:
+        st.session_state.debug_log = []
+    entry = f"[{_time.strftime('%H:%M:%S')}] {msg}"
+    st.session_state.debug_log.append(entry)
+    print(entry)  # also to server console
+    if len(st.session_state.debug_log) > 500:
+        st.session_state.debug_log = st.session_state.debug_log[-500:]
+
+def _safe_args(args):
+    """Truncate large values (base64) for safe logging."""
+    out = {}
+    for k, v in args.items():
+        if isinstance(v, str) and len(v) > 200:
+            out[k] = f"<{len(v)} chars>"
+        else:
+            out[k] = v
+    return out
+
+def _test_tcp(host, port, timeout=5):
+    """Test TCP connectivity → (ok, latency_ms, error)."""
+    try:
+        t0 = _time.time()
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.close()
+        return True, round((_time.time() - t0) * 1000), None
+    except Exception as e:
+        return False, 0, str(e)
 
 # TID OAuth Configuration
 TID_CLIENT_ID = os.getenv("TID_CLIENT_ID")
@@ -96,28 +133,45 @@ def decode_id_token_email(id_token):
 # MCP CALL
 # ============================================================
 def call_mcp_tool(tool_name: str, arguments: dict) -> dict:
+    _dbg(f"MCP CALL → {tool_name}({json.dumps(_safe_args(arguments))})")
+    t_start = _time.time()
+
     async def _call():
+        _dbg(f"  MCP connecting to {MCP_URL}")
+        t_conn = _time.time()
         async with streamablehttp_client(MCP_URL) as (read_stream, write_stream, _):
+            _dbg(f"  MCP connected ({_time.time() - t_conn:.2f}s)")
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
+                _dbg(f"  MCP session init ({_time.time() - t_conn:.2f}s)")
                 result = await session.call_tool(tool_name, arguments)
+                _dbg(f"  MCP tool returned ({_time.time() - t_conn:.2f}s) isError={result.isError}")
 
                 if result.isError:
                     error_msg = ""
                     for content in result.content:
                         if hasattr(content, "text"):
                             error_msg += content.text
+                    _dbg(f"  MCP ERROR: {error_msg[:300]}")
                     raise Exception(f"MCP tool error: {error_msg}")
 
                 for content in result.content:
                     if hasattr(content, "text"):
-                        return json.loads(content.text)
+                        parsed = json.loads(content.text)
+                        _dbg(f"  MCP RESPONSE: {json.dumps(parsed, default=str)[:300]}")
+                        return parsed
 
+                _dbg("  MCP returned EMPTY content!")
                 return {}
 
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(_call())
+        result = loop.run_until_complete(_call())
+        _dbg(f"MCP DONE ← {tool_name} ({_time.time() - t_start:.2f}s)")
+        return result
+    except Exception as e:
+        _dbg(f"MCP FAIL ← {tool_name} ({_time.time() - t_start:.2f}s): {e}")
+        raise
     finally:
         loop.close()
 
@@ -163,16 +217,29 @@ else:
 
 def check_speech_job_status(job_url):
     """Direct lightweight Speech API status check — bypasses MCP for fast polling."""
-    if not _SPEECH_KEY or not job_url:
+    _dbg(f"DIRECT → GET {job_url[:80]}...")
+    if not _SPEECH_KEY:
+        _dbg("  DIRECT SKIP: no AZURE_SPEECH_KEY")
+        return None
+    if not job_url:
+        _dbg("  DIRECT SKIP: no job_url")
         return None
     try:
+        t0 = _time.time()
         resp = _speech_session.get(job_url, timeout=15)
+        elapsed = _time.time() - t0
+        _dbg(f"  DIRECT HTTP {resp.status_code} ({elapsed:.2f}s)")
         if resp.status_code == 200:
-            return resp.json().get("status", "Unknown")
+            body = resp.json()
+            status = body.get("status", "Unknown")
+            _dbg(f"  DIRECT status={status} keys={list(body.keys())}")
+            if status == "Succeeded":
+                _dbg(f"  DIRECT links={json.dumps(body.get('links', {}))[:200]}")
+            return status
         else:
-            print(f"[WARN] Speech API status check returned {resp.status_code}")
+            _dbg(f"  DIRECT ERROR: {resp.text[:300]}")
     except Exception as e:
-        print(f"[WARN] Speech API direct check failed: {e}")
+        _dbg(f"  DIRECT EXCEPTION: {e}")
     return None
 
 
@@ -236,6 +303,9 @@ if "user_email" not in st.session_state:
 if "user_name" not in st.session_state:
     st.session_state.user_name = None
 
+if "debug_log" not in st.session_state:
+    st.session_state.debug_log = []
+
 
 # ============================================================
 # TID AUTHENTICATION FLOW
@@ -285,6 +355,122 @@ with st.sidebar:
             unsafe_allow_html=True
         )
         st.stop()
+
+
+# ============================================================
+# DEBUG DASHBOARD (sidebar — remove after debugging)
+# ============================================================
+with st.sidebar:
+    with st.expander("🐛 DEBUG DASHBOARD", expanded=False):
+        # --- ENVIRONMENT ---
+        st.markdown("#### Environment")
+        _env_items = [
+            ("Platform", platform.platform()),
+            ("Python", platform.python_version()),
+            ("MCP_URL", MCP_URL or "NOT SET"),
+            ("SPEECH_KEY", f"SET ({len(_SPEECH_KEY)} chars)" if _SPEECH_KEY else "NOT SET"),
+            ("SPEECH_REGION", os.getenv("AZURE_SPEECH_REGION", "NOT SET")),
+            ("SPEECH_API_VER", os.getenv("AZURE_SPEECH_API_VERSION", "NOT SET")),
+            ("STORAGE_ACCT", os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "NOT SET")),
+            ("STORAGE_KEY", f"SET ({len(os.getenv('AZURE_STORAGE_ACCOUNT_KEY',''))} chars)" if os.getenv("AZURE_STORAGE_ACCOUNT_KEY") else "NOT SET"),
+            ("BLOB_CONTAINER", os.getenv("AZURE_BLOB_CONTAINER", "NOT SET")),
+            ("TID_CLIENT_ID", "SET" if TID_CLIENT_ID else "NOT SET"),
+        ]
+        for _lbl, _val in _env_items:
+            st.text(f"{_lbl}: {_val}")
+
+        st.markdown("---")
+        st.markdown("#### Connectivity Tests")
+
+        if st.button("Test MCP", key="dbg_mcp"):
+            _dbg("=== MCP CONNECTIVITY TEST ===")
+            try:
+                from urllib.parse import urlparse
+                _p = urlparse(MCP_URL)
+                _h, _pt = _p.hostname, _p.port or (443 if _p.scheme == "https" else 80)
+                _dbg(f"TCP → {_h}:{_pt}")
+                _ok, _ms, _err = _test_tcp(_h, _pt)
+                if _ok:
+                    _dbg(f"TCP OK ({_ms}ms)")
+                    st.success(f"TCP to {_h}:{_pt} OK ({_ms}ms)")
+                else:
+                    _dbg(f"TCP FAIL: {_err}")
+                    st.error(f"TCP fail: {_err}")
+                t0 = _time.time()
+                _r = call_mcp_tool("transcription_status", {"job_url": "https://test.invalid", "email": st.session_state.user_email or "test"})
+                _dbg(f"MCP test call OK ({_time.time()-t0:.2f}s): {json.dumps(_r,default=str)[:200]}")
+                st.info(f"MCP response ({_time.time()-t0:.2f}s): {json.dumps(_r,default=str)[:150]}")
+            except Exception as _e:
+                _dbg(f"MCP test FAIL: {_e}\n{traceback.format_exc()}")
+                st.error(f"MCP fail: {_e}")
+
+        if st.button("Test Speech API", key="dbg_speech"):
+            _dbg("=== SPEECH API CONNECTIVITY TEST ===")
+            _region = os.getenv("AZURE_SPEECH_REGION", "")
+            if not _SPEECH_KEY or not _region:
+                _dbg(f"SKIP: key={'set' if _SPEECH_KEY else 'missing'} region={_region or 'missing'}")
+                st.error("Missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION")
+            else:
+                try:
+                    _api_v = os.getenv("AZURE_SPEECH_API_VERSION", "2024-11-15")
+                    _turl = f"https://{_region}.api.cognitive.microsoft.com/speechtotext/transcriptions?api-version={_api_v}&top=1"
+                    _dbg(f"GET {_turl}")
+                    t0 = _time.time()
+                    _resp = _speech_session.get(_turl, timeout=10)
+                    _dbg(f"HTTP {_resp.status_code} ({_time.time()-t0:.2f}s)")
+                    _dbg(f"Headers: {dict(list(_resp.headers.items())[:10])}")
+                    _dbg(f"Body[0:300]: {_resp.text[:300]}")
+                    if _resp.status_code == 200:
+                        _jobs = _resp.json().get("values", [])
+                        st.success(f"Speech API OK — {len(_jobs)} recent job(s)")
+                        if _jobs:
+                            _j = _jobs[0]
+                            _dbg(f"Latest job: status={_j.get('status')} name={_j.get('displayName')} self={_j.get('self','')[:100]}")
+                            st.info(f"Latest: {_j.get('displayName','')} — {_j.get('status','')}")
+                    else:
+                        st.error(f"HTTP {_resp.status_code}: {_resp.text[:200]}")
+                except Exception as _e:
+                    _dbg(f"Speech test FAIL: {_e}")
+                    st.error(f"Speech API fail: {_e}")
+
+        _test_job = st.text_input("Test job URL:", key="dbg_job_url", placeholder="Paste speech job URL")
+        if _test_job and st.button("Check Job", key="dbg_check_job"):
+            _dbg(f"=== MANUAL JOB CHECK: {_test_job[:100]} ===")
+            _ds = check_speech_job_status(_test_job)
+            st.info(f"Direct: {_ds}")
+            try:
+                _mr = call_mcp_tool("transcription_status", {"job_url": _test_job, "email": st.session_state.user_email or "test"})
+                st.info(f"MCP: {json.dumps(_mr,default=str)[:300]}")
+            except Exception as _e:
+                st.error(f"MCP: {_e}")
+
+        st.markdown("---")
+        st.markdown("#### Session State")
+        _sk_list = ["video_polling", "video_poll_count", "video_submit_time",
+                    "multi_polling", "multi_poll_count", "multi_submit_time"]
+        for _sk in _sk_list:
+            st.text(f"{_sk}: {st.session_state.get(_sk)}")
+        for _sk in ["video_result", "transcription_status", "multi_result", "multi_status"]:
+            _v = st.session_state.get(_sk)
+            if _v:
+                st.text(f"{_sk}: {json.dumps(_v,default=str)[:200]}")
+            else:
+                st.text(f"{_sk}: None")
+
+        st.markdown("---")
+        _log = st.session_state.get("debug_log", [])
+        st.markdown(f"#### Debug Log ({len(_log)} entries)")
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            if st.button("Clear", key="dbg_clear"):
+                st.session_state.debug_log = []
+                st.rerun()
+        with _c2:
+            st.download_button("Download", "\n".join(_log) or "(empty)", "debug_log.txt", key="dbg_dl")
+        if _log:
+            st.code("\n".join(_log[-150:]), language="text")
+        else:
+            st.caption("(no log entries yet)")
 
 
 # ============================================================
@@ -534,6 +720,7 @@ with tab_video:
                 st.session_state.video_submit_time = _time.time()
                 st.session_state.video_polling = True
                 st.session_state.video_poll_count = 0
+                _dbg(f"TAB3 JOB SUBMITTED: url={result.get('speech_job_url','')[:100]} filename={result.get('filename','')}")
                 st.rerun()
 
             except Exception as e:
@@ -554,6 +741,7 @@ with tab_video:
                 if st.session_state.get("video_polling", False):
                     st.session_state.video_poll_count = st.session_state.get("video_poll_count", 0) + 1
                     poll_count = st.session_state.video_poll_count
+                    _dbg(f"=== TAB3 POLL #{poll_count} ===")
 
                     debug_lines = []
                     debug_lines.append(f"🕐 **Poll at:** {_time.strftime('%H:%M:%S')} (cycle #{poll_count})")
@@ -596,9 +784,11 @@ with tab_video:
                             debug_lines.append(f"❌ **MCP error:** `{ex}` ({t_mcp:.2f}s)")
 
                     debug_lines.append(f"✅ **Final job_status:** `{job_status}`")
+                    _dbg(f"TAB3 FINAL: {job_status}")
 
                     elapsed = _time.time() - st.session_state.video_submit_time if st.session_state.video_submit_time else 0
                     mins, secs = divmod(int(elapsed), 60)
+                    _dbg(f"TAB3 elapsed: {mins}m{secs}s")
 
                     # Show debug panel
                     with st.expander(f"🐛 DEBUG — Poll #{poll_count} (remove after debugging)", expanded=True):
@@ -609,21 +799,43 @@ with tab_video:
                         # Fetch full result via MCP (one call)
                         if not st.session_state.transcription_status:
                             try:
-                                st.session_state.transcription_status = call_mcp_tool("transcription_status", {
+                                mcp_result = call_mcp_tool("transcription_status", {
                                     "job_url": job_url,
                                     "email": st.session_state.user_email
                                 })
+                                # Validate MCP returned actual data
+                                mcp_data = mcp_result.get("data") if isinstance(mcp_result, dict) else None
+                                if isinstance(mcp_data, dict) and mcp_data.get("status") == "Succeeded":
+                                    st.session_state.transcription_status = mcp_result
+                                    _dbg(f"TAB3 RESULT STORED: text_len={len(str(mcp_data.get('text','')))}")
+                                else:
+                                    _dbg(f"TAB3 RESULT INCOMPLETE — retrying: {json.dumps(mcp_result,default=str)[:200]}")
+                                    st.warning(f"⚠️ MCP returned incomplete data: `{json.dumps(mcp_result)[:200]}` — retrying...")
+                                    _time.sleep(5)
+                                    st.rerun()
                             except Exception as e:
+                                _dbg(f"TAB3 RESULT FETCH ERROR: {e}")
                                 st.error(f"Error fetching result: {e}")
                         st.session_state.video_polling = False
+                        _dbg("TAB3 POLLING STOPPED — Succeeded")
                         st.rerun()
                     elif job_status in ("Failed", "Cancelled"):
                         st.session_state.video_polling = False
+                        _dbg(f"TAB3 POLLING STOPPED — {job_status}")
                         st.error(f"❌ Job {job_status}")
                     elif poll_count >= 120:
                         st.session_state.video_polling = False
+                        _dbg("TAB3 POLLING STOPPED — 120 cycle limit")
                         st.error("❌ Polling stopped after 120 cycles (~10 min). Check debug info above.")
+                    elif job_status is None:
+                        _dbg(f"TAB3 STATUS UNKNOWN (None) — both direct & MCP failed, retrying...")
+                        st.warning("⚠️ Could not determine job status (both direct API & MCP returned nothing). Retrying...")
+                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
+                        st.progress(0.1, text=f"⏳ {video_filename} — waiting for status...")
+                        _time.sleep(5)
+                        st.rerun()
                     else:
+                        _dbg(f"TAB3 CONTINUE — status={job_status} sleeping 5s")
                         st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
                         st.progress(0.1, text=f"⏳ {video_filename} — video processing")
                         _time.sleep(5)
@@ -637,6 +849,10 @@ with tab_video:
     # DISPLAY TRANSCRIPTION STATUS
     if st.session_state.transcription_status:
         status = st.session_state.transcription_status
+
+        # Debug: show what was stored
+        with st.expander("🐛 DEBUG — Stored transcription_status (remove after debugging)", expanded=False):
+            st.code(json.dumps(status, indent=2, default=str)[:1000])
 
         if status.get("status") == "success":
             data = status.get("data") or {}
@@ -822,6 +1038,7 @@ with tab_multi:
                 if st.session_state.get("multi_polling", False):
                     st.session_state.multi_poll_count = st.session_state.get("multi_poll_count", 0) + 1
                     poll_count = st.session_state.multi_poll_count
+                    _dbg(f"=== TAB4 POLL #{poll_count} ===")
 
                     debug_lines = []
                     debug_lines.append(f"🕐 **Poll at:** {_time.strftime('%H:%M:%S')} (cycle #{poll_count})")
@@ -864,9 +1081,11 @@ with tab_multi:
                             debug_lines.append(f"❌ **MCP error:** `{ex}` ({t_mcp:.2f}s)")
 
                     debug_lines.append(f"✅ **Final job_status:** `{job_status}`")
+                    _dbg(f"TAB4 FINAL: {job_status}")
 
                     elapsed = _time.time() - st.session_state.multi_submit_time if st.session_state.multi_submit_time else 0
                     mins, secs = divmod(int(elapsed), 60)
+                    _dbg(f"TAB4 elapsed: {mins}m{secs}s")
 
                     # Show debug panel
                     with st.expander(f"🐛 DEBUG — Poll #{poll_count} (remove after debugging)", expanded=True):
@@ -876,21 +1095,42 @@ with tab_multi:
                     if job_status == "Succeeded":
                         if not st.session_state.multi_status:
                             try:
-                                st.session_state.multi_status = call_mcp_tool("multi_transcription_status", {
+                                mcp_result = call_mcp_tool("multi_transcription_status", {
                                     "job_url": job_url,
                                     "email": st.session_state.user_email
                                 })
+                                # Validate MCP returned actual data
+                                mcp_data = mcp_result.get("data") if isinstance(mcp_result, dict) else None
+                                if isinstance(mcp_data, dict) and mcp_data.get("status") == "Succeeded":
+                                    st.session_state.multi_status = mcp_result
+                                    _dbg(f"TAB4 RESULT STORED")
+                                else:
+                                    _dbg(f"TAB4 RESULT INCOMPLETE — retrying: {json.dumps(mcp_result,default=str)[:200]}")
+                                    st.warning(f"⚠️ MCP returned incomplete data: `{json.dumps(mcp_result)[:200]}` — retrying...")
+                                    _time.sleep(5)
+                                    st.rerun()
                             except Exception as e:
+                                _dbg(f"TAB4 RESULT FETCH ERROR: {e}")
                                 st.error(f"Error fetching result: {e}")
                         st.session_state.multi_polling = False
+                        _dbg("TAB4 POLLING STOPPED — Succeeded")
                         st.rerun()
                     elif job_status in ("Failed", "Cancelled"):
                         st.session_state.multi_polling = False
+                        _dbg(f"TAB4 POLLING STOPPED — {job_status}")
                         st.error(f"❌ Job {job_status}")
                     elif poll_count >= 120:
                         st.session_state.multi_polling = False
+                        _dbg("TAB4 POLLING STOPPED — 120 cycle limit")
                         st.error("❌ Polling stopped after 120 cycles (~10 min). Check debug info above.")
+                    elif job_status is None:
+                        _dbg(f"TAB4 STATUS UNKNOWN (None) — both direct & MCP failed, retrying...")
+                        st.warning("⚠️ Could not determine job status (both direct API & MCP returned nothing). Retrying...")
+                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
+                        _time.sleep(5)
+                        st.rerun()
                     else:
+                        _dbg(f"TAB4 CONTINUE — status={job_status} sleeping 5s")
                         st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
                         for fi in files_info:
                             if fi["status"] == "uploaded":
