@@ -46,7 +46,6 @@ def get_tid_auth_url():
         "response_type": "code",
         "redirect_uri": TID_REDIRECT_URI,
         "client_id": TID_CLIENT_ID,
-        "scope": TID_OAUTH_SCOPE,
     })
     return f"{TID_AUTH_URL}?{params}"
 
@@ -152,19 +151,28 @@ def markdown_to_text(md):
     return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', md)
 
 
+# Reusable session for Speech API polling (connection reuse)
+_speech_session = http_requests.Session()
+_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "")
+if _SPEECH_KEY:
+    _speech_session.headers.update({"Ocp-Apim-Subscription-Key": _SPEECH_KEY})
+    print(f"[INFO] AZURE_SPEECH_KEY loaded ({len(_SPEECH_KEY)} chars) — direct polling enabled")
+else:
+    print("[WARN] AZURE_SPEECH_KEY not set — polling will fall back to MCP (slower)")
+
+
 def check_speech_job_status(job_url):
     """Direct lightweight Speech API status check — bypasses MCP for fast polling."""
-    speech_key = os.getenv("AZURE_SPEECH_KEY", "")
-    if not speech_key or not job_url:
+    if not _SPEECH_KEY or not job_url:
         return None
     try:
-        resp = http_requests.get(job_url, headers={
-            "Ocp-Apim-Subscription-Key": speech_key
-        }, timeout=15)
+        resp = _speech_session.get(job_url, timeout=15)
         if resp.status_code == 200:
             return resp.json().get("status", "Unknown")
-    except Exception:
-        pass
+        else:
+            print(f"[WARN] Speech API status check returned {resp.status_code}")
+    except Exception as e:
+        print(f"[WARN] Speech API direct check failed: {e}")
     return None
 
 
@@ -781,7 +789,6 @@ with tab_multi:
                         st.markdown(f"{icon} **{fi['name']}** — {fi['status']}" +
                                     (f" ({fi['error']})" if fi.get("error") else ""))
 
-            # ---- AUTO-POLL STATUS ----
             # ---- AUTO-POLL STATUS ----
             job_url = result.get("speech_job_url", "")
             if job_url:
