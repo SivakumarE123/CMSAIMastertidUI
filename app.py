@@ -459,6 +459,9 @@ if "blob_urls_value" not in st.session_state:
 if "gdrive_creds_value" not in st.session_state:
     st.session_state.gdrive_creds_value = ""
 
+if "user_products" not in st.session_state:
+    st.session_state.user_products = []
+
 
 # ============================================================
 # TID AUTHENTICATION FLOW
@@ -496,6 +499,18 @@ if not st.session_state.authenticated:
     st.info("Redirecting to Trimble Identity login...")
     st.stop()
 
+# Fetch user permissions from Cosmos (once per session)
+if st.session_state.authenticated and not st.session_state.user_products:
+    try:
+        _perms = call_mcp_tool("get_permissions", {"email": st.session_state.user_email})
+        st.session_state.user_products = _perms.get("products", [])
+    except Exception as _e:
+        print(f"[WARN] Failed to fetch permissions: {_e}")
+        st.session_state.user_products = []
+
+_has_debug = "debug" in st.session_state.user_products
+_has_admin = "admin" in st.session_state.user_products
+
 # Sidebar: user info and sign out
 with st.sidebar:
     st.markdown(f"👤 **{st.session_state.user_name or st.session_state.user_email}**")
@@ -511,119 +526,209 @@ with st.sidebar:
 
 
 # ============================================================
-# DEBUG DASHBOARD (sidebar — remove after debugging)
+# DEBUG DASHBOARD (sidebar — only visible with "debug" permission)
 # ============================================================
-with st.sidebar:
-    with st.expander("🐛 DEBUG DASHBOARD", expanded=False):
-        # --- ENVIRONMENT ---
-        st.markdown("#### Environment")
-        _env_items = [
-            ("Platform", platform.platform()),
-            ("Python", platform.python_version()),
-            ("MCP_URL", MCP_URL or "NOT SET"),
-            ("SPEECH_KEY", f"SET ({len(_SPEECH_KEY)} chars)" if _SPEECH_KEY else "NOT SET"),
-            ("SPEECH_REGION", os.getenv("AZURE_SPEECH_REGION", "NOT SET")),
-            ("SPEECH_API_VER", os.getenv("AZURE_SPEECH_API_VERSION", "NOT SET")),
-            ("STORAGE_ACCT", os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "NOT SET")),
-            ("STORAGE_KEY", f"SET ({len(os.getenv('AZURE_STORAGE_ACCOUNT_KEY',''))} chars)" if os.getenv("AZURE_STORAGE_ACCOUNT_KEY") else "NOT SET"),
-            ("BLOB_CONTAINER", os.getenv("AZURE_BLOB_CONTAINER", "NOT SET")),
-            ("TID_CLIENT_ID", "SET" if TID_CLIENT_ID else "NOT SET"),
-        ]
-        for _lbl, _val in _env_items:
-            st.text(f"{_lbl}: {_val}")
+if _has_debug:
+    with st.sidebar:
+        with st.expander("🐛 DEBUG DASHBOARD", expanded=False):
+            # --- ENVIRONMENT ---
+            st.markdown("#### Environment")
+            _env_items = [
+                ("Platform", platform.platform()),
+                ("Python", platform.python_version()),
+                ("MCP_URL", MCP_URL or "NOT SET"),
+                ("SPEECH_KEY", f"SET ({len(_SPEECH_KEY)} chars)" if _SPEECH_KEY else "NOT SET"),
+                ("SPEECH_REGION", os.getenv("AZURE_SPEECH_REGION", "NOT SET")),
+                ("SPEECH_API_VER", os.getenv("AZURE_SPEECH_API_VERSION", "NOT SET")),
+                ("STORAGE_ACCT", os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "NOT SET")),
+                ("STORAGE_KEY", f"SET ({len(os.getenv('AZURE_STORAGE_ACCOUNT_KEY',''))} chars)" if os.getenv("AZURE_STORAGE_ACCOUNT_KEY") else "NOT SET"),
+                ("BLOB_CONTAINER", os.getenv("AZURE_BLOB_CONTAINER", "NOT SET")),
+                ("TID_CLIENT_ID", "SET" if TID_CLIENT_ID else "NOT SET"),
+            ]
+            for _lbl, _val in _env_items:
+                st.text(f"{_lbl}: {_val}")
 
-        st.markdown("---")
-        st.markdown("#### Connectivity Tests")
+            st.markdown("---")
+            st.markdown("#### Connectivity Tests")
 
-        if st.button("Test MCP", key="dbg_mcp"):
-            _dbg("=== MCP CONNECTIVITY TEST ===")
-            try:
-                from urllib.parse import urlparse
-                _p = urlparse(MCP_URL)
-                _h, _pt = _p.hostname, _p.port or (443 if _p.scheme == "https" else 80)
-                _dbg(f"TCP → {_h}:{_pt}")
-                _ok, _ms, _err = _test_tcp(_h, _pt)
-                if _ok:
-                    _dbg(f"TCP OK ({_ms}ms)")
-                    st.success(f"TCP to {_h}:{_pt} OK ({_ms}ms)")
-                else:
-                    _dbg(f"TCP FAIL: {_err}")
-                    st.error(f"TCP fail: {_err}")
-                t0 = _time.time()
-                _r = call_mcp_tool("transcription_status", {"job_url": "https://test.invalid", "email": st.session_state.user_email or "test"})
-                _dbg(f"MCP test call OK ({_time.time()-t0:.2f}s): {json.dumps(_r,default=str)[:200]}")
-                st.info(f"MCP response ({_time.time()-t0:.2f}s): {json.dumps(_r,default=str)[:150]}")
-            except Exception as _e:
-                _dbg(f"MCP test FAIL: {_e}\n{traceback.format_exc()}")
-                st.error(f"MCP fail: {_e}")
-
-        if st.button("Test Speech API", key="dbg_speech"):
-            _dbg("=== SPEECH API CONNECTIVITY TEST ===")
-            _region = os.getenv("AZURE_SPEECH_REGION", "")
-            if not _SPEECH_KEY or not _region:
-                _dbg(f"SKIP: key={'set' if _SPEECH_KEY else 'missing'} region={_region or 'missing'}")
-                st.error("Missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION")
-            else:
+            if st.button("Test MCP", key="dbg_mcp"):
+                _dbg("=== MCP CONNECTIVITY TEST ===")
                 try:
-                    _api_v = os.getenv("AZURE_SPEECH_API_VERSION", "2024-11-15")
-                    _turl = f"https://{_region}.api.cognitive.microsoft.com/speechtotext/transcriptions?api-version={_api_v}&top=1"
-                    _dbg(f"GET {_turl}")
-                    t0 = _time.time()
-                    _resp = _speech_session.get(_turl, timeout=10)
-                    _dbg(f"HTTP {_resp.status_code} ({_time.time()-t0:.2f}s)")
-                    _dbg(f"Headers: {dict(list(_resp.headers.items())[:10])}")
-                    _dbg(f"Body[0:300]: {_resp.text[:300]}")
-                    if _resp.status_code == 200:
-                        _jobs = _resp.json().get("values", [])
-                        st.success(f"Speech API OK — {len(_jobs)} recent job(s)")
-                        if _jobs:
-                            _j = _jobs[0]
-                            _dbg(f"Latest job: status={_j.get('status')} name={_j.get('displayName')} self={_j.get('self','')[:100]}")
-                            st.info(f"Latest: {_j.get('displayName','')} — {_j.get('status','')}")
+                    from urllib.parse import urlparse
+                    _p = urlparse(MCP_URL)
+                    _h, _pt = _p.hostname, _p.port or (443 if _p.scheme == "https" else 80)
+                    _dbg(f"TCP → {_h}:{_pt}")
+                    _ok, _ms, _err = _test_tcp(_h, _pt)
+                    if _ok:
+                        _dbg(f"TCP OK ({_ms}ms)")
+                        st.success(f"TCP to {_h}:{_pt} OK ({_ms}ms)")
                     else:
-                        st.error(f"HTTP {_resp.status_code}: {_resp.text[:200]}")
+                        _dbg(f"TCP FAIL: {_err}")
+                        st.error(f"TCP fail: {_err}")
+                    t0 = _time.time()
+                    _r = call_mcp_tool("transcription_status", {"job_url": "https://test.invalid", "email": st.session_state.user_email or "test"})
+                    _dbg(f"MCP test call OK ({_time.time()-t0:.2f}s): {json.dumps(_r,default=str)[:200]}")
+                    st.info(f"MCP response ({_time.time()-t0:.2f}s): {json.dumps(_r,default=str)[:150]}")
                 except Exception as _e:
-                    _dbg(f"Speech test FAIL: {_e}")
-                    st.error(f"Speech API fail: {_e}")
+                    _dbg(f"MCP test FAIL: {_e}\n{traceback.format_exc()}")
+                    st.error(f"MCP fail: {_e}")
 
-        _test_job = st.text_input("Test job URL:", key="dbg_job_url", placeholder="Paste speech job URL")
-        if _test_job and st.button("Check Job", key="dbg_check_job"):
-            _dbg(f"=== MANUAL JOB CHECK: {_test_job[:100]} ===")
-            _ds = check_speech_job_status(_test_job)
-            st.info(f"Direct: {_ds}")
-            try:
-                _mr = call_mcp_tool("transcription_status", {"job_url": _test_job, "email": st.session_state.user_email or "test"})
-                st.info(f"MCP: {json.dumps(_mr,default=str)[:300]}")
-            except Exception as _e:
-                st.error(f"MCP: {_e}")
+            if st.button("Test Speech API", key="dbg_speech"):
+                _dbg("=== SPEECH API CONNECTIVITY TEST ===")
+                _region = os.getenv("AZURE_SPEECH_REGION", "")
+                if not _SPEECH_KEY or not _region:
+                    _dbg(f"SKIP: key={'set' if _SPEECH_KEY else 'missing'} region={_region or 'missing'}")
+                    st.error("Missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION")
+                else:
+                    try:
+                        _api_v = os.getenv("AZURE_SPEECH_API_VERSION", "2024-11-15")
+                        _turl = f"https://{_region}.api.cognitive.microsoft.com/speechtotext/transcriptions?api-version={_api_v}&top=1"
+                        _dbg(f"GET {_turl}")
+                        t0 = _time.time()
+                        _resp = _speech_session.get(_turl, timeout=10)
+                        _dbg(f"HTTP {_resp.status_code} ({_time.time()-t0:.2f}s)")
+                        _dbg(f"Headers: {dict(list(_resp.headers.items())[:10])}")
+                        _dbg(f"Body[0:300]: {_resp.text[:300]}")
+                        if _resp.status_code == 200:
+                            _jobs = _resp.json().get("values", [])
+                            st.success(f"Speech API OK — {len(_jobs)} recent job(s)")
+                            if _jobs:
+                                _j = _jobs[0]
+                                _dbg(f"Latest job: status={_j.get('status')} name={_j.get('displayName')} self={_j.get('self','')[:100]}")
+                                st.info(f"Latest: {_j.get('displayName','')} — {_j.get('status','')}")
+                        else:
+                            st.error(f"HTTP {_resp.status_code}: {_resp.text[:200]}")
+                    except Exception as _e:
+                        _dbg(f"Speech test FAIL: {_e}")
+                        st.error(f"Speech API fail: {_e}")
 
-        st.markdown("---")
-        st.markdown("#### Session State")
-        _sk_list = ["video_polling", "video_poll_count", "video_submit_time",
-                    "multi_polling", "multi_poll_count", "multi_submit_time"]
-        for _sk in _sk_list:
-            st.text(f"{_sk}: {st.session_state.get(_sk)}")
-        for _sk in ["video_result", "transcription_status", "multi_result", "multi_status"]:
-            _v = st.session_state.get(_sk)
-            if _v:
-                st.text(f"{_sk}: {json.dumps(_v,default=str)[:200]}")
+            _test_job = st.text_input("Test job URL:", key="dbg_job_url", placeholder="Paste speech job URL")
+            if _test_job and st.button("Check Job", key="dbg_check_job"):
+                _dbg(f"=== MANUAL JOB CHECK: {_test_job[:100]} ===")
+                _ds = check_speech_job_status(_test_job)
+                st.info(f"Direct: {_ds}")
+                try:
+                    _mr = call_mcp_tool("transcription_status", {"job_url": _test_job, "email": st.session_state.user_email or "test"})
+                    st.info(f"MCP: {json.dumps(_mr,default=str)[:300]}")
+                except Exception as _e:
+                    st.error(f"MCP: {_e}")
+
+            st.markdown("---")
+            st.markdown("#### Session State")
+            _sk_list = ["video_polling", "video_poll_count", "video_submit_time",
+                        "multi_polling", "multi_poll_count", "multi_submit_time"]
+            for _sk in _sk_list:
+                st.text(f"{_sk}: {st.session_state.get(_sk)}")
+            for _sk in ["video_result", "transcription_status", "multi_result", "multi_status"]:
+                _v = st.session_state.get(_sk)
+                if _v:
+                    st.text(f"{_sk}: {json.dumps(_v,default=str)[:200]}")
+                else:
+                    st.text(f"{_sk}: None")
+
+            st.markdown("---")
+            _log = st.session_state.get("debug_log", [])
+            st.markdown(f"#### Debug Log ({len(_log)} entries)")
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                if st.button("Clear", key="dbg_clear"):
+                    st.session_state.debug_log = []
+                    st.rerun()
+            with _c2:
+                st.download_button("Download", "\n".join(_log) or "(empty)", "debug_log.txt", key="dbg_dl")
+            if _log:
+                st.code("\n".join(_log[-150:]), language="text")
             else:
-                st.text(f"{_sk}: None")
+                st.caption("(no log entries yet)")
 
-        st.markdown("---")
-        _log = st.session_state.get("debug_log", [])
-        st.markdown(f"#### Debug Log ({len(_log)} entries)")
-        _c1, _c2 = st.columns(2)
-        with _c1:
-            if st.button("Clear", key="dbg_clear"):
-                st.session_state.debug_log = []
-                st.rerun()
-        with _c2:
-            st.download_button("Download", "\n".join(_log) or "(empty)", "debug_log.txt", key="dbg_dl")
-        if _log:
-            st.code("\n".join(_log[-150:]), language="text")
-        else:
-            st.caption("(no log entries yet)")
+
+# ============================================================
+# ADMIN PANEL (sidebar — only visible with "admin" permission)
+# ============================================================
+if _has_admin:
+    with st.sidebar:
+        with st.expander("⚙️ ADMIN PANEL", expanded=False):
+            st.markdown("#### Manage Users")
+
+            # Fetch all products dynamically
+            if "admin_products_list" not in st.session_state:
+                st.session_state.admin_products_list = []
+            if "admin_users_list" not in st.session_state:
+                st.session_state.admin_users_list = []
+
+            if st.button("🔄 Refresh Users & Products", key="admin_refresh"):
+                try:
+                    _prod_resp = call_mcp_tool("admin_get_products", {"email": st.session_state.user_email})
+                    if _prod_resp.get("status") == "success":
+                        st.session_state.admin_products_list = _prod_resp["products"]
+                    _users_resp = call_mcp_tool("admin_list_users", {"email": st.session_state.user_email})
+                    if _users_resp.get("status") == "success":
+                        st.session_state.admin_users_list = _users_resp["users"]
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Error: {_e}")
+
+            # Show existing users
+            _admin_users = st.session_state.admin_users_list
+            if _admin_users:
+                st.markdown(f"**{len(_admin_users)} user(s):**")
+                for _au in _admin_users:
+                    _prods = ", ".join(_au.get("products", []))
+                    st.caption(f"📧 {_au['email']} → {_prods}")
+
+            st.markdown("---")
+            st.markdown("#### Add / Update User")
+
+            _admin_email = st.text_input("User email", key="admin_email_input", placeholder="user@example.com")
+
+            _available_products = st.session_state.admin_products_list or ["pii", "ocr", "transcription", "debug", "admin"]
+            _selected_products = st.multiselect(
+                "Products",
+                options=_available_products,
+                default=[],
+                key="admin_product_select"
+            )
+
+            _admin_col1, _admin_col2 = st.columns(2)
+            with _admin_col1:
+                if st.button("✅ Save User", key="admin_save"):
+                    if not _admin_email or not _admin_email.strip():
+                        st.error("Enter an email")
+                    elif not _selected_products:
+                        st.error("Select at least one product")
+                    else:
+                        try:
+                            _save_resp = call_mcp_tool("admin_upsert_user", {
+                                "target_email": _admin_email.strip(),
+                                "products_json": json.dumps(_selected_products),
+                                "email": st.session_state.user_email
+                            })
+                            if _save_resp.get("status") == "success":
+                                st.success(f"✅ {_save_resp.get('status', '')} — {_admin_email}")
+                                # Refresh user list
+                                st.session_state.admin_users_list = []
+                            else:
+                                st.error(_save_resp.get("error", "Failed"))
+                        except Exception as _e:
+                            st.error(f"Error: {_e}")
+
+            with _admin_col2:
+                if st.button("🗑️ Delete User", key="admin_delete"):
+                    if not _admin_email or not _admin_email.strip():
+                        st.error("Enter an email")
+                    else:
+                        try:
+                            _del_resp = call_mcp_tool("admin_delete_user", {
+                                "target_email": _admin_email.strip(),
+                                "email": st.session_state.user_email
+                            })
+                            if _del_resp.get("status") == "success":
+                                st.success(f"🗑️ Deleted {_admin_email}")
+                                st.session_state.admin_users_list = []
+                            else:
+                                st.error(_del_resp.get("error", "Failed"))
+                        except Exception as _e:
+                            st.error(f"Error: {_e}")
 
 
 # ============================================================
@@ -944,9 +1049,10 @@ with tab_video:
                     _dbg(f"TAB3 elapsed: {mins}m{secs}s")
 
                     # Show debug panel
-                    with st.expander(f"🐛 DEBUG — Poll #{poll_count} (remove after debugging)", expanded=True):
-                        for line in debug_lines:
-                            st.markdown(line)
+                    if _has_debug:
+                        with st.expander(f"🐛 DEBUG — Poll #{poll_count}", expanded=True):
+                            for line in debug_lines:
+                                st.markdown(line)
 
                     if job_status == "Succeeded":
                         # Fetch full result — try DIRECT first, fall back to MCP
@@ -1012,8 +1118,9 @@ with tab_video:
         status = st.session_state.transcription_status
 
         # Debug: show what was stored
-        with st.expander("🐛 DEBUG — Stored transcription_status (remove after debugging)", expanded=False):
-            st.code(json.dumps(status, indent=2, default=str)[:1000])
+        if _has_debug:
+            with st.expander("🐛 DEBUG — Stored transcription_status", expanded=False):
+                st.code(json.dumps(status, indent=2, default=str)[:1000])
 
         if status.get("status") == "success":
             data = status.get("data") or {}
@@ -1341,9 +1448,10 @@ with tab_multi:
                     _dbg(f"TAB4 elapsed: {mins}m{secs}s")
 
                     # Show debug panel
-                    with st.expander(f"🐛 DEBUG — Poll #{poll_count} (remove after debugging)", expanded=True):
-                        for line in debug_lines:
-                            st.markdown(line)
+                    if _has_debug:
+                        with st.expander(f"🐛 DEBUG — Poll #{poll_count}", expanded=True):
+                            for line in debug_lines:
+                                st.markdown(line)
 
                     if job_status == "Succeeded":
                         if not st.session_state.multi_status:
