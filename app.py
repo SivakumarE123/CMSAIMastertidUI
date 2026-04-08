@@ -677,43 +677,108 @@ if _has_admin:
                     st.caption(f"📧 {_au['email']} → {_prods}")
 
             st.markdown("---")
-            st.markdown("#### Add / Update User")
+            st.markdown("#### Manage User")
 
             _admin_email = st.text_input("User email", key="admin_email_input", placeholder="user@example.com")
 
-            _available_products = st.session_state.admin_products_list or ["pii", "ocr", "transcription", "debug", "admin"]
+            # Lookup: show current permissions when email is entered
+            if _admin_email and _admin_email.strip():
+                _existing_user = None
+                for _au in st.session_state.admin_users_list:
+                    if _au["email"].lower() == _admin_email.strip().lower():
+                        _existing_user = _au
+                        break
+                if _existing_user:
+                    _existing_prods = _existing_user.get("products", [])
+                    st.caption(f"Current: {', '.join(_existing_prods) or '(none)'}")
+                else:
+                    st.caption("New user (not in Cosmos yet)")
+
+            st.markdown("##### Products")
+            _available_products = [p for p in (st.session_state.admin_products_list or ["pii", "ocr", "transcription"]) if p not in ("admin", "debug")]
             _selected_products = st.multiselect(
-                "Products",
+                "Select products to grant",
                 options=_available_products,
                 default=[],
-                key="admin_product_select"
+                key="admin_product_select",
+                label_visibility="collapsed"
             )
 
-            _admin_col1, _admin_col2 = st.columns(2)
-            with _admin_col1:
-                if st.button("✅ Save User", key="admin_save"):
+            st.markdown("##### Roles")
+            _role_col1, _role_col2 = st.columns(2)
+            with _role_col1:
+                _grant_admin = st.checkbox("🔑 Admin", key="admin_toggle_admin")
+            with _role_col2:
+                _grant_debug = st.checkbox("🐛 Debug", key="admin_toggle_debug")
+
+            # --- Action buttons ---
+            _btn_col1, _btn_col2, _btn_col3 = st.columns(3)
+
+            with _btn_col1:
+                if st.button("✅ Save", key="admin_save"):
                     if not _admin_email or not _admin_email.strip():
                         st.error("Enter an email")
-                    elif not _selected_products:
-                        st.error("Select at least one product")
                     else:
+                        _all_products = list(_selected_products)
+                        if _grant_admin:
+                            _all_products.append("admin")
+                        if _grant_debug:
+                            _all_products.append("debug")
                         try:
                             _save_resp = call_mcp_tool("admin_upsert_user", {
                                 "target_email": _admin_email.strip(),
-                                "products_json": json.dumps(_selected_products),
+                                "products_json": json.dumps(_all_products),
                                 "email": st.session_state.user_email
                             })
                             if _save_resp.get("status") == "success":
-                                st.success(f"✅ {_save_resp.get('status', '')} — {_admin_email}")
-                                # Refresh user list
+                                st.success(f"✅ {_save_resp.get('result', 'saved')} — {_admin_email}")
                                 st.session_state.admin_users_list = []
                             else:
                                 st.error(_save_resp.get("error", "Failed"))
                         except Exception as _e:
                             st.error(f"Error: {_e}")
 
-            with _admin_col2:
-                if st.button("🗑️ Delete User", key="admin_delete"):
+            with _btn_col2:
+                if st.button("🔄 Update", key="admin_update"):
+                    if not _admin_email or not _admin_email.strip():
+                        st.error("Enter an email")
+                    else:
+                        # Merge: keep existing products, apply selected changes
+                        _existing_user = None
+                        for _au in st.session_state.admin_users_list:
+                            if _au["email"].lower() == _admin_email.strip().lower():
+                                _existing_user = _au
+                                break
+                        if not _existing_user:
+                            st.error("User not found — use Save for new users")
+                        else:
+                            _current = set(_existing_user.get("products", []))
+                            # Remove admin/debug from current, then rebuild
+                            _current -= {"admin", "debug"}
+                            # Replace product selections
+                            _new_prods = set(_selected_products) if _selected_products else (_current - set(_available_products))
+                            # Add back non-product items from current that aren't admin/debug
+                            _new_prods |= (_current - set(_available_products))
+                            if _grant_admin:
+                                _new_prods.add("admin")
+                            if _grant_debug:
+                                _new_prods.add("debug")
+                            try:
+                                _upd_resp = call_mcp_tool("admin_upsert_user", {
+                                    "target_email": _admin_email.strip(),
+                                    "products_json": json.dumps(sorted(_new_prods)),
+                                    "email": st.session_state.user_email
+                                })
+                                if _upd_resp.get("status") == "success":
+                                    st.success(f"🔄 Updated — {_admin_email}")
+                                    st.session_state.admin_users_list = []
+                                else:
+                                    st.error(_upd_resp.get("error", "Failed"))
+                            except Exception as _e:
+                                st.error(f"Error: {_e}")
+
+            with _btn_col3:
+                if st.button("🗑️ Delete", key="admin_delete"):
                     if not _admin_email or not _admin_email.strip():
                         st.error("Enter an email")
                     else:
