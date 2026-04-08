@@ -657,6 +657,7 @@ if _has_admin:
                 st.session_state.admin_users_list = []
 
             if st.button("🔄 Refresh Users & Products", key="admin_refresh"):
+                _refresh_ok = False
                 try:
                     _prod_resp = call_mcp_tool("admin_get_products", {"email": st.session_state.user_email})
                     if _prod_resp.get("status") == "success":
@@ -664,9 +665,11 @@ if _has_admin:
                     _users_resp = call_mcp_tool("admin_list_users", {"email": st.session_state.user_email})
                     if _users_resp.get("status") == "success":
                         st.session_state.admin_users_list = _users_resp["users"]
-                    st.rerun()
+                    _refresh_ok = True
                 except Exception as _e:
                     st.error(f"Error: {_e}")
+                if _refresh_ok:
+                    st.rerun()
 
             # Show existing users
             _admin_users = st.session_state.admin_users_list
@@ -711,7 +714,7 @@ if _has_admin:
                         })
                         if _add_resp.get("status") == "success":
                             st.success(f"✅ {_add_resp.get('result', 'saved')} — {_add_email}")
-                            st.session_state.admin_users_list = []
+                            st.session_state.admin_users_list = []  # clear cache so refresh picks up new user
                         else:
                             st.error(_add_resp.get("error", "Failed"))
                     except Exception as _e:
@@ -722,14 +725,23 @@ if _has_admin:
             st.markdown("#### ✏️ Update User")
             _upd_email = st.text_input("Email", key="admin_upd_email", placeholder="existing@example.com")
 
-            # Show current permissions when email is entered
+            # Live lookup from Cosmos when email is entered
             _upd_existing = None
             _upd_existing_prods = []
             if _upd_email and _upd_email.strip():
+                # First check cached list
                 for _au in st.session_state.admin_users_list:
                     if _au["email"].lower() == _upd_email.strip().lower():
                         _upd_existing = _au
                         break
+                # If not in cache, query Cosmos directly
+                if not _upd_existing:
+                    try:
+                        _lookup_resp = call_mcp_tool("get_permissions", {"email": _upd_email.strip()})
+                        if _lookup_resp.get("status") == "success" and _lookup_resp.get("products"):
+                            _upd_existing = {"email": _upd_email.strip(), "products": _lookup_resp["products"]}
+                    except Exception:
+                        pass
                 if _upd_existing:
                     _upd_existing_prods = _upd_existing.get("products", [])
                     st.caption(f"Current: {', '.join(_upd_existing_prods) or '(none)'}")
@@ -769,7 +781,7 @@ if _has_admin:
                             })
                             if _upd_resp.get("status") == "success":
                                 st.success(f"🔄 Updated — {_upd_email}")
-                                st.session_state.admin_users_list = []
+                                st.session_state.admin_users_list = []  # clear cache so refresh picks up changes
                             else:
                                 st.error(_upd_resp.get("error", "Failed"))
                         except Exception as _e:
