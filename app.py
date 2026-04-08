@@ -1057,15 +1057,7 @@ with tab_multi:
         st.rerun()
 
     # ---- SOURCES SECTION ----
-    st.subheader("📁 File Uploads")
-    multi_files = st.file_uploader(
-        "Upload multiple video/audio files",
-        type=["mp4", "mov", "mkv", "wav", "mp3", "flac", "ogg"],
-        accept_multiple_files=True,
-        key=f"multi_upload_{st.session_state.multi_uploader_key}"
-    )
-
-    st.subheader("🔗 Azure Blob URLs")
+    st.subheader(" Azure Blob URLs")
     blob_urls_input = st.text_area(
         "Paste Azure Blob URLs (one per line, with SAS token)",
         height=100,
@@ -1128,17 +1120,6 @@ with tab_multi:
     # ---- BUILD SOURCES LIST ----
     if st.button("🚀 Start Batch Transcription", key="multi_start"):
         sources = []
-
-        # File uploads
-        if multi_files:
-            for f in multi_files:
-                b64 = base64.b64encode(f.getvalue()).decode()
-                sources.append({
-                    "source_type": "file_upload",
-                    "data": b64,
-                    "filename": f.name,
-                    "creds_encrypted": ""
-                })
 
         # Blob URLs
         if blob_urls_input.strip():
