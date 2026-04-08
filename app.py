@@ -544,64 +544,50 @@ with tab_video:
             if job_url:
                 # Auto-poll if polling is active
                 if st.session_state.get("video_polling", False):
-                    progress_ph = st.empty()
-                    status_ph = st.empty()
-                    poll_error = None
+                    # Fast direct API check first
+                    job_status = check_speech_job_status(job_url)
+                    print(f"[POLL-VIDEO] direct check → {job_status}")
 
-                    while True:
-                        t0 = _time.time()
-                        # Try direct API first (fast, ~1s)
-                        job_status = check_speech_job_status(job_url)
+                    # Fallback to MCP if direct check unavailable
+                    if job_status is None:
+                        try:
+                            print("[POLL-VIDEO] direct unavailable, falling back to MCP...")
+                            fallback = call_mcp_tool("transcription_status", {
+                                "job_url": job_url,
+                                "email": st.session_state.user_email
+                            })
+                            if isinstance(fallback, dict) and fallback.get("status") == "success":
+                                inner = fallback.get("data") or {}
+                                if isinstance(inner, dict):
+                                    job_status = inner.get("status", "Running")
+                                    if job_status == "Succeeded":
+                                        st.session_state.transcription_status = fallback
+                            print(f"[POLL-VIDEO] MCP fallback → {job_status}")
+                        except Exception as ex:
+                            print(f"[POLL-VIDEO] MCP fallback error: {ex}")
 
-                        # Fallback to MCP if direct check unavailable
-                        if job_status is None:
+                    elapsed = _time.time() - st.session_state.video_submit_time if st.session_state.video_submit_time else 0
+                    mins, secs = divmod(int(elapsed), 60)
+
+                    if job_status == "Succeeded":
+                        # Fetch full result via MCP (one call)
+                        if not st.session_state.transcription_status:
                             try:
-                                fallback = call_mcp_tool("transcription_status", {
+                                st.session_state.transcription_status = call_mcp_tool("transcription_status", {
                                     "job_url": job_url,
                                     "email": st.session_state.user_email
                                 })
-                                if isinstance(fallback, dict) and fallback.get("status") == "success":
-                                    inner = fallback.get("data") or {}
-                                    if isinstance(inner, dict):
-                                        job_status = inner.get("status", "Running")
-                                        if job_status == "Succeeded":
-                                            st.session_state.transcription_status = fallback
-                            except Exception:
-                                pass
-
-                        elapsed = _time.time() - st.session_state.video_submit_time if st.session_state.video_submit_time else 0
-                        mins, secs = divmod(int(elapsed), 60)
-
-                        if job_status == "Succeeded":
-                            if not st.session_state.transcription_status:
-                                try:
-                                    result_data = call_mcp_tool("transcription_status", {
-                                        "job_url": job_url,
-                                        "email": st.session_state.user_email
-                                    })
-                                    st.session_state.transcription_status = result_data
-                                except Exception as e:
-                                    poll_error = f"Error fetching result: {e}"
-                            st.session_state.video_polling = False
-                            break
-                        elif job_status in ("Failed", "Cancelled"):
-                            poll_error = f"❌ Job {job_status}"
-                            st.session_state.video_polling = False
-                            break
-                        elif elapsed > 1800:
-                            poll_error = "❌ Polling timed out after 30 minutes"
-                            st.session_state.video_polling = False
-                            break
-                        else:
-                            status_ph.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
-                            progress_ph.progress(0.1, text=f"⏳ {video_filename} — video processing")
-                            _time.sleep(max(0, 5 - (_time.time() - t0)))
-
-                    progress_ph.empty()
-                    status_ph.empty()
-                    if poll_error:
-                        st.error(poll_error)
-                    elif st.session_state.transcription_status:
+                            except Exception as e:
+                                st.error(f"Error fetching result: {e}")
+                        st.session_state.video_polling = False
+                        st.rerun()
+                    elif job_status in ("Failed", "Cancelled"):
+                        st.session_state.video_polling = False
+                        st.error(f"❌ Job {job_status}")
+                    else:
+                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
+                        st.progress(0.1, text=f"⏳ {video_filename} — video processing")
+                        _time.sleep(5)
                         st.rerun()
 
         elif result.get("status") == "unauthorized":
@@ -793,67 +779,51 @@ with tab_multi:
             job_url = result.get("speech_job_url", "")
             if job_url:
                 if st.session_state.get("multi_polling", False):
-                    progress_ph = st.empty()
-                    status_ph = st.empty()
-                    poll_error = None
+                    # Fast direct API check first
+                    job_status = check_speech_job_status(job_url)
+                    print(f"[POLL-MULTI] direct check → {job_status}")
 
-                    while True:
-                        t0 = _time.time()
-                        # Try direct API first (fast, ~1s)
-                        job_status = check_speech_job_status(job_url)
+                    # Fallback to MCP if direct check unavailable
+                    if job_status is None:
+                        try:
+                            print("[POLL-MULTI] direct unavailable, falling back to MCP...")
+                            fallback = call_mcp_tool("multi_transcription_status", {
+                                "job_url": job_url,
+                                "email": st.session_state.user_email
+                            })
+                            if isinstance(fallback, dict) and fallback.get("status") == "success":
+                                inner = fallback.get("data") or {}
+                                if isinstance(inner, dict):
+                                    job_status = inner.get("status", "Running")
+                                    if job_status == "Succeeded":
+                                        st.session_state.multi_status = fallback
+                            print(f"[POLL-MULTI] MCP fallback → {job_status}")
+                        except Exception as ex:
+                            print(f"[POLL-MULTI] MCP fallback error: {ex}")
 
-                        # Fallback to MCP if direct check unavailable
-                        if job_status is None:
+                    elapsed = _time.time() - st.session_state.multi_submit_time if st.session_state.multi_submit_time else 0
+                    mins, secs = divmod(int(elapsed), 60)
+
+                    if job_status == "Succeeded":
+                        if not st.session_state.multi_status:
                             try:
-                                fallback = call_mcp_tool("multi_transcription_status", {
+                                st.session_state.multi_status = call_mcp_tool("multi_transcription_status", {
                                     "job_url": job_url,
                                     "email": st.session_state.user_email
                                 })
-                                if isinstance(fallback, dict) and fallback.get("status") == "success":
-                                    inner = fallback.get("data") or {}
-                                    if isinstance(inner, dict):
-                                        job_status = inner.get("status", "Running")
-                                        if job_status == "Succeeded":
-                                            st.session_state.multi_status = fallback
-                            except Exception:
-                                pass
-
-                        elapsed = _time.time() - st.session_state.multi_submit_time if st.session_state.multi_submit_time else 0
-                        mins, secs = divmod(int(elapsed), 60)
-
-                        if job_status == "Succeeded":
-                            if not st.session_state.multi_status:
-                                try:
-                                    result_data = call_mcp_tool("multi_transcription_status", {
-                                        "job_url": job_url,
-                                        "email": st.session_state.user_email
-                                    })
-                                    st.session_state.multi_status = result_data
-                                except Exception as e:
-                                    poll_error = f"Error fetching result: {e}"
-                            st.session_state.multi_polling = False
-                            break
-                        elif job_status in ("Failed", "Cancelled"):
-                            poll_error = f"❌ Job {job_status}"
-                            st.session_state.multi_polling = False
-                            break
-                        elif elapsed > 1800:
-                            poll_error = "❌ Polling timed out after 30 minutes"
-                            st.session_state.multi_polling = False
-                            break
-                        else:
-                            status_ph.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
-                            with progress_ph.container():
-                                for fi in files_info:
-                                    if fi["status"] == "uploaded":
-                                        st.progress(0.1, text=f"⏳ {fi['name']} — video processing")
-                            _time.sleep(max(0, 5 - (_time.time() - t0)))
-
-                    progress_ph.empty()
-                    status_ph.empty()
-                    if poll_error:
-                        st.error(poll_error)
-                    elif st.session_state.multi_status:
+                            except Exception as e:
+                                st.error(f"Error fetching result: {e}")
+                        st.session_state.multi_polling = False
+                        st.rerun()
+                    elif job_status in ("Failed", "Cancelled"):
+                        st.session_state.multi_polling = False
+                        st.error(f"❌ Job {job_status}")
+                    else:
+                        st.markdown(f"**⏱ Elapsed:** {mins}m {secs}s")
+                        for fi in files_info:
+                            if fi["status"] == "uploaded":
+                                st.progress(0.1, text=f"⏳ {fi['name']} — video processing")
+                        _time.sleep(5)
                         st.rerun()
 
         elif result.get("status") == "unauthorized":
