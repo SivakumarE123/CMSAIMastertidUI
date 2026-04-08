@@ -235,12 +235,41 @@ def check_speech_job_status(job_url):
             _dbg(f"  DIRECT status={status} keys={list(body.keys())}")
             if status == "Succeeded":
                 _dbg(f"  DIRECT links={json.dumps(body.get('links', {}))[:200]}")
+            elif status == "Failed":
+                props = body.get("properties", {})
+                err = props.get("error", {})
+                _dbg(f"  DIRECT FAILED reason: code={err.get('code','')} msg={err.get('message','')[:300]}")
+                _dbg(f"  DIRECT FAILED properties: {json.dumps(props, default=str)[:500]}")
             return status
         else:
             _dbg(f"  DIRECT ERROR: {resp.text[:300]}")
     except Exception as e:
         _dbg(f"  DIRECT EXCEPTION: {e}")
     return None
+
+
+def get_speech_job_error(job_url):
+    """Fetch the error details from a Failed speech job."""
+    if not _SPEECH_KEY or not job_url:
+        return "(cannot fetch error — no key)"
+    try:
+        resp = _speech_session.get(job_url, timeout=15)
+        if resp.status_code == 200:
+            body = resp.json()
+            props = body.get("properties", {})
+            err = props.get("error", {})
+            code = err.get("code", "")
+            msg = err.get("message", "")
+            # Also check contentUrls for debugging
+            content_urls = body.get("contentUrls", body.get("contentContainerUrl", ""))
+            _dbg(f"JOB ERROR DETAIL: code={code} msg={msg}")
+            _dbg(f"JOB contentUrls: {json.dumps(content_urls, default=str)[:300]}")
+            _dbg(f"JOB full properties: {json.dumps(props, default=str)[:500]}")
+            detail = f"**Error code:** `{code}`\n\n**Message:** {msg}" if code or msg else "No error details available"
+            return detail
+        return f"HTTP {resp.status_code}"
+    except Exception as e:
+        return f"Error fetching details: {e}"
 
 
 def fetch_speech_result_direct(job_url):
@@ -1057,7 +1086,22 @@ with tab_multi:
     )
     multi_creds_encrypted = ""
     if gdrive_creds_raw and gdrive_urls_input.strip():
+        _dbg(f"TAB4 ENCRYPTING Google creds ({len(gdrive_creds_raw)} chars)")
         try:
+            # Validate JSON before encrypting
+            try:
+                _parsed_creds = json.loads(gdrive_creds_raw)
+                _cred_keys = list(_parsed_creds.keys())
+                _dbg(f"TAB4 Google creds JSON keys: {_cred_keys}")
+                _required = {"client_id", "client_secret", "refresh_token"}
+                _missing = _required - set(_cred_keys)
+                if _missing:
+                    st.warning(f"⚠️ Google OAuth JSON missing keys: {_missing} — may fail")
+                    _dbg(f"TAB4 Google creds MISSING keys: {_missing}")
+            except json.JSONDecodeError as je:
+                st.error(f"❌ Google OAuth JSON is invalid: {je}")
+                _dbg(f"TAB4 Google creds INVALID JSON: {je}")
+
             enc_result = call_mcp_tool("encrypt_user_secret", {
                 "plain_text": gdrive_creds_raw,
                 "email": st.session_state.user_email
@@ -1065,10 +1109,13 @@ with tab_multi:
             if enc_result.get("status") == "success":
                 multi_creds_encrypted = enc_result["encrypted"]
                 st.success("🔒 Credentials encrypted")
+                _dbg(f"TAB4 Creds encrypted OK ({len(multi_creds_encrypted)} chars)")
             else:
                 st.error(enc_result.get("error", "Encryption failed"))
+                _dbg(f"TAB4 Creds encryption FAILED: {enc_result.get('error','')}")
         except Exception as e:
             st.error(f"Encryption error: {e}")
+            _dbg(f"TAB4 Creds encryption ERROR: {e}")
 
     # ---- BUILD SOURCES LIST ----
     if st.button("🚀 Start Batch Transcription", key="multi_start"):
@@ -1112,6 +1159,29 @@ with tab_multi:
         if not sources:
             st.error("No files or URLs provided")
         else:
+            # Debug: log source breakdown
+            _src_types = {}
+            for s in sources:
+                t = s["source_type"]
+                _src_types[t] = _src_types.get(t, 0) + 1
+            _dbg(f"TAB4 SUBMITTING {len(sources)} sources: {_src_types}")
+            for i, s in enumerate(sources):
+                _data_preview = s['data'][:80] + '...' if len(s.get('data','')) > 80 else s.get('data','')
+                if s['source_type'] == 'file_upload':
+                    _data_preview = f"<base64 {len(s['data'])} chars>"
+                _dbg(f"  TAB4 src[{i}]: type={s['source_type']} name={s['filename']} data={_data_preview}")
+
+            # Validate blob URLs before submitting
+            for s in sources:
+                if s['source_type'] == 'blob_url':
+                    _url = s['data']
+                    if '?' not in _url:
+                        st.warning(f"⚠️ Blob URL has no SAS token (no '?' found): `{s['filename']}` — Speech API may reject it")
+                        _dbg(f"TAB4 WARN: blob URL has no SAS token: {_url[:100]}")
+                    if not _url.startswith('https://'):
+                        st.error(f"❌ Invalid blob URL (must start with https://): `{s['filename']}`")
+                        _dbg(f"TAB4 ERROR: invalid blob URL: {_url[:100]}")
+
             st.info(f"📦 Submitting **{len(sources)}** file(s) for batch transcription...")
             try:
                 with st.spinner(f"Uploading {len(sources)} file(s) and submitting batch job..."):
@@ -1119,6 +1189,10 @@ with tab_multi:
                         "sources_json": json.dumps(sources),
                         "email": st.session_state.user_email
                     })
+                _dbg(f"TAB4 SUBMIT RESULT: uploaded={result.get('uploaded')} failed={result.get('failed')} job_url={result.get('speech_job_url','')[:80]}")
+                # Log blob URLs that were sent to Speech API
+                for fi in result.get('files', []):
+                    _dbg(f"  TAB4 file: {fi.get('name')} status={fi.get('status')} blob_url={fi.get('blob_url','')[:100]} error={fi.get('error','')}")
                 st.session_state.multi_result = result
                 st.session_state.multi_status = None
                 st.session_state.multi_polling = True
@@ -1126,6 +1200,7 @@ with tab_multi:
                 st.session_state.multi_poll_count = 0
                 st.rerun()
             except Exception as e:
+                _dbg(f"TAB4 SUBMIT ERROR: {e}\n{traceback.format_exc()}")
                 st.error(str(e))
                 st.code(traceback.format_exc())
 
@@ -1146,11 +1221,16 @@ with tab_multi:
             # Show per-file upload status
             files_info = result.get("files", [])
             if files_info:
-                with st.expander(f"📋 Upload Details ({len(files_info)} files)", expanded=False):
+                with st.expander(f"📋 Upload Details ({len(files_info)} files)", expanded=True):
                     for i, fi in enumerate(files_info):
                         icon = "✅" if fi["status"] == "uploaded" else "❌"
                         st.markdown(f"{icon} **{fi['name']}** — {fi['status']}" +
                                     (f" ({fi['error']})" if fi.get("error") else ""))
+                        # Show the blob URL that was sent to Speech API
+                        if fi.get("blob_url"):
+                            _burl = fi['blob_url']
+                            _has_sas = '?' in _burl
+                            st.caption(f"Blob URL: `{_burl[:120]}{'...' if len(_burl) > 120 else ''}` {'✅ has SAS' if _has_sas else '⚠️ NO SAS token'}")
 
             # ---- AUTO-POLL STATUS ----
             job_url = result.get("speech_job_url", "")
@@ -1247,6 +1327,46 @@ with tab_multi:
                         st.session_state.multi_polling = False
                         _dbg(f"TAB4 POLLING STOPPED — {job_status}")
                         st.error(f"❌ Job {job_status}")
+                        # Fetch and display the actual error from Speech API
+                        _dbg("TAB4 FETCHING ERROR DETAILS...")
+                        err_detail = get_speech_job_error(job_url)
+                        with st.expander("🔍 Failure Details (from Azure Speech API)", expanded=True):
+                            st.markdown(err_detail)
+
+                            # Show the blob URLs that were submitted
+                            st.markdown("---")
+                            st.markdown("**Submitted content URLs:**")
+                            for fi in files_info:
+                                _burl = fi.get('blob_url', '')
+                                _st = fi.get('status', '')
+                                if _burl:
+                                    _has_sas = '?' in _burl
+                                    st.markdown(f"- `{fi['name']}` → `{_burl[:150]}{'...' if len(_burl)>150 else ''}` {'✅ SAS' if _has_sas else '⚠️ NO SAS'}")
+                                elif _st == 'failed':
+                                    st.markdown(f"- `{fi['name']}` → ❌ upload failed: {fi.get('error','')}")
+
+                            # Validate each blob URL is reachable
+                            st.markdown("---")
+                            st.markdown("**Blob URL reachability check:**")
+                            for fi in files_info:
+                                _burl = fi.get('blob_url', '')
+                                if _burl:
+                                    try:
+                                        _head = http_requests.head(_burl, timeout=10, allow_redirects=True)
+                                        _dbg(f"TAB4 BLOB CHECK {fi['name']}: HTTP {_head.status_code} content-type={_head.headers.get('Content-Type','')}")
+                                        if _head.status_code == 200:
+                                            st.markdown(f"- ✅ `{fi['name']}` — HTTP 200, Content-Type: `{_head.headers.get('Content-Type','?')}`")
+                                        else:
+                                            st.markdown(f"- ❌ `{fi['name']}` — HTTP {_head.status_code} ({_head.reason})")
+                                    except Exception as _be:
+                                        _dbg(f"TAB4 BLOB CHECK {fi['name']}: FAIL {_be}")
+                                        st.markdown(f"- ❌ `{fi['name']}` — unreachable: {_be}")
+
+                            st.markdown("---")
+                            st.markdown("""**Common causes:**
+- **Blob URLs:** SAS token expired, missing `r` permission, IP restriction blocking Azure Speech API, URL malformed
+- **File uploads:** File too large, unsupported format, blob storage auth issue on MCP server
+- **Google Drive:** OAuth token expired/invalid, file not shared, wrong URL format (need `/d/<id>/`)""")
                     elif poll_count >= 120:
                         st.session_state.multi_polling = False
                         _dbg("TAB4 POLLING STOPPED — 120 cycle limit")
