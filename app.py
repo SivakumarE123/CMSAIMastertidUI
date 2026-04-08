@@ -447,6 +447,18 @@ if "user_name" not in st.session_state:
 if "debug_log" not in st.session_state:
     st.session_state.debug_log = []
 
+if "show_blob_urls" not in st.session_state:
+    st.session_state.show_blob_urls = False
+
+if "show_gdrive_creds" not in st.session_state:
+    st.session_state.show_gdrive_creds = False
+
+if "blob_urls_value" not in st.session_state:
+    st.session_state.blob_urls_value = ""
+
+if "gdrive_creds_value" not in st.session_state:
+    st.session_state.gdrive_creds_value = ""
+
 
 # ============================================================
 # TID AUTHENTICATION FLOW
@@ -1057,18 +1069,39 @@ with tab_multi:
         st.rerun()
 
     # ---- SOURCES SECTION ----
-    st.subheader(" Azure Blob URLs")
-    blob_urls_input = st.text_area(
-        "Paste Azure Blob URLs (one per line, with SAS token)",
-        height=100,
-        key="multi_blob_urls",
-        help="Supports both individual blob file URLs and container URLs. "
-             "If you paste a **container URL** (e.g. https://account.blob.core.windows.net/container?sp=rl&...), "
-             "all audio/video files in the container will be discovered automatically. "
-             "The SAS token needs **Read (r) + List (l)** permissions for container auto-discovery."
-    )
+    st.subheader("🔗 Azure Blob URLs")
+    st.info("💡 **Container URL tip:** For auto-discovery of all files, your SAS token needs **Read (r) + List (l)** permissions (`sp=rl`). Without List permission, container URLs will fail.")
+
+    _blob_col1, _blob_col2 = st.columns([0.92, 0.08])
+    with _blob_col2:
+        if st.button("👁️" if not st.session_state.show_blob_urls else "🙈", key="toggle_blob_vis", help="Show/hide SAS URLs"):
+            st.session_state.show_blob_urls = not st.session_state.show_blob_urls
+            st.rerun()
+    with _blob_col1:
+        if st.session_state.show_blob_urls:
+            _blob_input = st.text_area(
+                "Paste Azure Blob URLs (one per line, with SAS token)",
+                value=st.session_state.blob_urls_value,
+                height=100,
+                key="multi_blob_urls_visible",
+                help="Supports both individual blob file URLs and container URLs. "
+                     "If you paste a **container URL** (e.g. https://account.blob.core.windows.net/container?sp=rl&...), "
+                     "all audio/video files in the container will be discovered automatically. "
+                     "The SAS token needs **Read (r) + List (l)** permissions for container auto-discovery."
+            )
+        else:
+            _blob_input = st.text_input(
+                "Paste Azure Blob URLs (one per line, with SAS token)",
+                value=st.session_state.blob_urls_value,
+                type="password",
+                key="multi_blob_urls_hidden",
+                help="Click 👁️ to reveal. Supports blob file URLs and container URLs."
+            )
+    st.session_state.blob_urls_value = _blob_input
+    blob_urls_input = _blob_input
 
     st.subheader("📂 Google Drive URLs")
+    st.info("💡 **Folder URL tip:** For auto-discovery of all files in a folder, your OAuth credentials must have **Drive read** (`drive.readonly`) scope.")
     gdrive_urls_input = st.text_area(
         "Paste Google Drive file or folder URLs (one per line)",
         height=80,
@@ -1078,12 +1111,31 @@ with tab_multi:
              "all audio/video files in the folder will be discovered and transcribed automatically. "
              "Your OAuth credentials must have Drive read access."
     )
-    gdrive_creds_raw = st.text_area(
-        "Google OAuth Credentials JSON (shared for all Drive files)",
-        height=100,
-        key="multi_gdrive_creds",
-        help="Paste your Google OAuth credentials JSON. It will be encrypted before sending."
-    )
+    gdrive_creds_label = "Google OAuth Credentials JSON (shared for all Drive files)"
+    _creds_col1, _creds_col2 = st.columns([0.92, 0.08])
+    with _creds_col2:
+        if st.button("👁️" if not st.session_state.show_gdrive_creds else "🙈", key="toggle_creds_vis", help="Show/hide credentials"):
+            st.session_state.show_gdrive_creds = not st.session_state.show_gdrive_creds
+            st.rerun()
+    with _creds_col1:
+        if st.session_state.show_gdrive_creds:
+            _creds_input = st.text_area(
+                gdrive_creds_label,
+                value=st.session_state.gdrive_creds_value,
+                height=100,
+                key="multi_gdrive_creds_visible",
+                help="Paste your Google OAuth credentials JSON. It will be encrypted before sending."
+            )
+        else:
+            _creds_input = st.text_input(
+                gdrive_creds_label,
+                value=st.session_state.gdrive_creds_value,
+                type="password",
+                key="multi_gdrive_creds_hidden",
+                help="Click 👁️ to reveal. Paste your Google OAuth credentials JSON."
+            )
+    st.session_state.gdrive_creds_value = _creds_input
+    gdrive_creds_raw = _creds_input
     multi_creds_encrypted = ""
     if gdrive_creds_raw and gdrive_urls_input.strip():
         _dbg(f"TAB4 ENCRYPTING Google creds ({len(gdrive_creds_raw)} chars)")
@@ -1424,32 +1476,24 @@ with tab_multi:
                         with st.expander(f"{icon} {fr['name']} — {fr['status']}", expanded=(i == 0)):
                             if fr.get("text"):
                                 st.text_area("", fr["text"], height=200, key=f"multi_file_{i}")
+                                _dl_col1, _dl_col2 = st.columns(2)
+                                with _dl_col1:
+                                    st.download_button(
+                                        "📄 Download Text",
+                                        fr["text"],
+                                        f"{os.path.splitext(fr['name'])[0]}_transcription.txt",
+                                        key=f"multi_file_txt_{i}"
+                                    )
+                                with _dl_col2:
+                                    st.download_button(
+                                        "📥 Download JSON",
+                                        json.dumps({"filename": fr["name"], "status": fr["status"], "transcribed_text": fr["text"]}, indent=2),
+                                        f"{os.path.splitext(fr['name'])[0]}_transcription.json",
+                                        mime="application/json",
+                                        key=f"multi_file_json_{i}"
+                                    )
                             else:
                                 st.info("No speech detected in this file")
-
-                # Combined text
-                if total_text:
-                    st.subheader("📝 Combined Transcription")
-                    st.text_area("", total_text, height=400, key="multi_combined_text")
-
-                    # Downloads
-                    st.download_button("📄 Download Text", total_text, "batch_transcription.txt", key="multi_dl_txt")
-
-                    # Per-file JSON
-                    json_output = json.dumps({
-                        "total_files": total_count,
-                        "completed_files": completed,
-                        "files": file_results,
-                        "combined_text": total_text
-                    }, indent=2)
-
-                    st.download_button(
-                        "📥 Download JSON",
-                        json_output,
-                        "batch_transcription.json",
-                        mime="application/json",
-                        key="multi_dl_json"
-                    )
 
             elif job_status in ("Failed", "Cancelled"):
                 st.error(f"❌ Job {job_status}")
