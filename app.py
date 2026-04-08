@@ -1069,14 +1069,22 @@ with tab_multi:
     blob_urls_input = st.text_area(
         "Paste Azure Blob URLs (one per line, with SAS token)",
         height=100,
-        key="multi_blob_urls"
+        key="multi_blob_urls",
+        help="Supports both individual blob file URLs and container URLs. "
+             "If you paste a **container URL** (e.g. https://account.blob.core.windows.net/container?sp=rl&...), "
+             "all audio/video files in the container will be discovered automatically. "
+             "The SAS token needs **Read (r) + List (l)** permissions for container auto-discovery."
     )
 
     st.subheader("📂 Google Drive URLs")
     gdrive_urls_input = st.text_area(
-        "Paste Google Drive file URLs (one per line)",
+        "Paste Google Drive file or folder URLs (one per line)",
         height=80,
-        key="multi_gdrive_urls"
+        key="multi_gdrive_urls",
+        help="Supports both individual file URLs and **folder URLs**. "
+             "If you paste a folder URL (e.g. https://drive.google.com/drive/folders/<id>), "
+             "all audio/video files in the folder will be discovered and transcribed automatically. "
+             "Your OAuth credentials must have Drive read access."
     )
     gdrive_creds_raw = st.text_area(
         "Google OAuth Credentials JSON (shared for all Drive files)",
@@ -1137,10 +1145,18 @@ with tab_multi:
             for line in blob_urls_input.strip().splitlines():
                 url = line.strip()
                 if url:
+                    # Detect container URL vs individual blob file
+                    from urllib.parse import urlparse as _urlparse
+                    _p = _urlparse(url)
+                    _path_parts = [p for p in _p.path.strip("/").split("/") if p]
+                    if len(_path_parts) <= 1:
+                        fname = "container (auto-expand)"
+                    else:
+                        fname = url.split("/")[-1].split("?")[0] or "blob_file"
                     sources.append({
                         "source_type": "blob_url",
                         "data": url,
-                        "filename": url.split("/")[-1].split("?")[0] or "blob_file",
+                        "filename": fname,
                         "creds_encrypted": ""
                     })
 
@@ -1149,10 +1165,14 @@ with tab_multi:
             for line in gdrive_urls_input.strip().splitlines():
                 url = line.strip()
                 if url:
+                    if "/folders/" in url:
+                        fname = "drive_folder (auto-expand)"
+                    else:
+                        fname = f"gdrive_{url[-10:]}"
                     sources.append({
                         "source_type": "gdrive",
                         "data": url,
-                        "filename": f"gdrive_{url[-10:]}",
+                        "filename": fname,
                         "creds_encrypted": multi_creds_encrypted
                     })
 
